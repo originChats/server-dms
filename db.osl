@@ -1,0 +1,354 @@
+import "osl/fs"
+
+def userExists(string username) bool (
+    string uname = username.toLower()
+    auto path = "db/users/" ++ uname ++ ".json"
+    return fs.Exists(path)
+)
+
+def getUser(string username) object (
+    string uname = username.toLower()
+    auto path = "db/users/" ++ uname ++ ".json"
+    if !fs.Exists(path) (
+        object newObject = {
+            username: uname,
+            channels: []
+        }
+        fs.WriteFile(path, newObject.JsonStringify())
+        return newObject
+    )
+
+    auto content = fs.ReadFile(path).JsonParse()
+    if typeof(content) != "object" (
+        return {
+            username: uname,
+            channels: []
+        }
+    )
+    return content.assert(object)
+)
+
+def saveUser(string username, object user) (
+    string uname = username.toLower()
+    auto path = "db/users/" ++ uname ++ ".json"
+    fs.WriteFile(path, user.JsonStringify())
+)
+
+def addChannelToUser(string username, string channelId) (
+    object user = getUser(username)
+
+    if typeof(user.channels) != "array" (
+        user.channels = []
+    )
+
+    array channels = user.channels.assert(array)
+    if !channels.contains(channelId) (
+        channels.append(channelId)
+        user.channels = channels
+        saveUser(username, user)
+    )
+)
+
+def removeChannelFromUser(string username, string channelId) (
+    object user = getUser(username)
+
+    if typeof(user.channels) != "array" (
+        return
+    )
+
+    array channels = user.channels.assert(array)
+    array newChannels = []
+    int len = channels.len
+    int i = 1
+    while i <= len (
+        string c = channels[i].toStr()
+        if c != channelId (
+            newChannels.append(c)
+        )
+        i = i + 1
+    )
+    user.channels = newChannels
+    saveUser(username, user)
+)
+
+def getChannel(string channelId) object (
+    auto path = "db/channels/" ++ channelId ++ ".json"
+    if !fs.Exists(path) (
+        return null
+    )
+
+    auto content = fs.ReadFile(path).JsonParse()
+    if typeof(content) != "object" (
+        return null
+    )
+    return content.assert(object)
+)
+
+def saveChannel(string channelId, object channel) (
+    auto path = "db/channels/" ++ channelId ++ ".json"
+    fs.WriteFile(path, channel.JsonStringify())
+)
+
+def randomString(int length) string (
+    string chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    string result = ""
+    for i length (
+        result = result ++ chars[rand.Intn(chars.len) + 1].toStr()
+    )
+    return result
+)
+
+def findExistingDMChannel(string user1, string user2) string (
+    object u1 = getUser(user1)
+    if typeof(u1.channels) != "array" (
+        return ""
+    )
+
+    string lowerUser1 = user1.toLower()
+    string lowerUser2 = user2.toLower()
+
+    array channels = u1.channels.assert(array)
+    int len = channels.len
+    int i = 1
+    while i <= len (
+        string channelId = channels[i].toStr()
+        object ch = getChannel(channelId)
+        if ch.type.toStr() == "dm" (
+            if typeof(ch.members) == "array" (
+                array members = ch.members.assert(array)
+                int memLen = members.len
+                int j = 1
+                bool hasUser1 = false
+                bool hasUser2 = false
+                while j <= memLen (
+                    string member = members[j].toStr()
+                    if member == lowerUser1 (
+                        hasUser1 = true
+                    )
+                    if member == lowerUser2 (
+                        hasUser2 = true
+                    )
+                    j = j + 1
+                )
+                if hasUser1 and hasUser2 (
+                    return channelId
+                )
+            )
+        )
+        i += 1
+    )
+    return ""
+)
+
+def createDMChannel(string user1, string user2) string (
+    string existingChannel = findExistingDMChannel(user1, user2)
+    if existingChannel != "" (
+        return existingChannel
+    )
+
+    string channelId = randomString(10)
+    object channel = {
+        id: channelId,
+        type: "dm",
+        name: channelId,
+        members: [user1.toLower(), user2.toLower()],
+        created_at: timestamp
+    }
+    saveChannel(channelId, channel)
+    addChannelToUser(user1, channelId)
+    addChannelToUser(user2, channelId)
+    return channelId
+)
+
+def createGroupChannel(string creator, string name, array members) string (
+    string channelId = randomString(10)
+    array allMembers = [creator.toLower()]
+    int len = members.len
+    int i = 1
+    while i <= len (
+        allMembers.append(members[i].toStr().toLower())
+        addChannelToUser(members[i].toStr(), channelId)
+        i = i + 1
+    )
+    addChannelToUser(creator, channelId)
+    
+    object channel = {
+        id: channelId,
+        type: "group",
+        name: name,
+        display_name: channelId,
+        members: allMembers,
+        creator: creator.toLower(),
+        created_at: timestamp
+    }
+    saveChannel(channelId, channel)
+    return channelId
+)
+
+def addUserToGroupChannel(string channelId, string username) bool (
+    object ch = getChannel(channelId)
+    if ch == null (
+        return false
+    )
+    if ch.type.toStr() != "group" (
+        return false
+    )
+    
+    string lowerUsername = username.toLower()
+    
+    if typeof(ch.members) != "array" (
+        ch.members = []
+    )
+    
+    array members = ch.members.assert(array)
+    if members.contains(lowerUsername) (
+        return false
+    )
+    
+    members.append(lowerUsername)
+    ch.members = members
+    saveChannel(channelId, ch)
+    addChannelToUser(username, channelId)
+    return true
+)
+
+def sendChannelMessage(string channelId, string content, string username) object (
+    object ch = getChannel(channelId)
+    if ch == null (
+        return null
+    )
+
+    if typeof(ch.members) != "array" (
+        return null
+    )
+
+    array members = ch.members.assert(array)
+    if !members.contains(username.toLower()) (
+        log "User not in channel"
+        return null
+    )
+
+    if typeof(ch.messages) != "array" (
+        ch.messages = []
+    )
+
+    string messageId = randomString(10)
+    object message = {
+        id: messageId,
+        user: username.toLower(),
+        content: content,
+        timestamp,
+        type: "message"
+    }
+
+    array messages = ch.messages.assert(array)
+    messages.append(message)
+    ch.messages = messages
+    saveChannel(channelId, ch)
+    return message
+)
+
+def getChannelMessages(string channelId) array (
+    object ch = getChannel(channelId)
+    if ch == null (
+        return []
+    )
+
+    if typeof(ch.messages) != "array" (
+        return []
+    )
+
+    return ch.messages.assert(array)
+)
+
+def editChannelMessage(string channelId, string messageId, string newContent, string username) bool (
+    object ch = getChannel(channelId)
+    if ch == null (
+        return false
+    )
+
+    if typeof(ch.messages) != "array" (
+        return false
+    )
+
+    array messages = ch.messages.assert(array)
+    for i messages.len (
+        auto msg = messages[i]
+        if typeof(msg) == "object" (
+            object message = msg.assert(object)
+            if message.id.toStr() == messageId (
+                if message.user.toStr() != username.toLower() (
+                    return false
+                )
+                message.content = newContent
+                message.edited = true
+                message.edited_at = timestamp
+                messages[i] = message
+                ch.messages = messages
+                saveChannel(channelId, ch)
+                return true
+            )
+        )
+    )
+    return false
+)
+
+def deleteChannelMessage(string channelId, string messageId, string username) bool (
+    object ch = getChannel(channelId)
+    if ch == null (
+        return false
+    )
+
+    if typeof(ch.messages) != "array" (
+        return false
+    )
+
+    array messages = ch.messages.assert(array)
+    array newMessages = []
+    bool deleted = false
+    for i messages.len (
+        auto msg = messages[i]
+        if typeof(msg) == "object" (
+            object message = msg.assert(object)
+            if !deleted and message.id.toStr() == messageId (
+                if message.user.toStr() != username.toLower() (
+                    return false
+                )
+                deleted = true
+            ) else (
+                newMessages.append(messages[i])
+            )
+        ) else (
+            newMessages.append(messages[i])
+        )
+    )
+    if deleted (
+        ch.messages = newMessages
+        saveChannel(channelId, ch)
+        return true
+    )
+    return false
+)
+
+def getMessage(string channelId, string messageId) object (
+    object ch = getChannel(channelId)
+    if ch == null (
+        return null
+    )
+
+    if typeof(ch.messages) != "array" (
+        return null
+    )
+
+    array messages = ch.messages.assert(array)
+    for i messages.len (
+        auto msg = messages[i]
+        if typeof(msg) == "object" (
+            object message = msg.assert(object)
+            if message.id.toStr() == messageId (
+                return message
+            )
+        )
+    )
+    return null
+)

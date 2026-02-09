@@ -1,0 +1,186 @@
+def errorMsg(string msg) object (
+    return {
+        "cmd": "error",
+        "val": msg
+    }
+)
+
+def authErrorMsg(string msg) object (
+    return {
+        "cmd": "auth_error",
+        "val": msg
+    }
+)
+
+def successMsg(string msg) object (
+    return {
+        "cmd": "success",
+        "val": msg
+    }
+)
+
+def formatChannelForAPI(object channel, object userChannels) object (
+    string channelId = channel.id.toStr()
+    string channelType = channel.type.toStr()
+    string name = channel.name.toStr()
+    string description = ""
+
+    switch channelType (
+        case "dm"
+            if typeof(channel.members) == "array" (
+                array members = channel.members.assert(array)
+                if members.len >= 2 (
+                    string currentUser = userChannels.username.toStr()
+                    string otherUser = ""
+                    for i members.len (
+                        string m = members[i].toStr()
+                        if m != currentUser (
+                            otherUser = m
+                        )
+                    )
+                    name = otherUser
+                    description = "Direct message with " ++ otherUser
+                )
+            )
+        case "group"
+            if typeof(channel.name) != "null" and channel.name.toStr() != "" (
+                name = channel.name.toStr()
+            )
+            description = "Group chat"
+            if typeof(channel.display_name) != "null" and channel.display_name.toStr() != "" (
+                description = channel.display_name.toStr()
+            )
+            break
+    )
+
+    return {
+        type: "text",
+        name: channelId,
+        display_name: name,
+        description: description,
+        permissions: {
+            view: [channelId],
+            send: ["user"],
+            delete_own: ["user"],
+            edit_own: ["user"]
+        }
+    }
+)
+
+def getCmdsChannel() object (
+    return {
+        type: "text",
+        permissions: {
+            view: ["user"],
+            send: ["user"]
+        },
+        name: "cmds",
+        description: "Available commands"
+    }
+)
+
+def getLastMessageTimestamp(object channel) number (
+    if channel == null (
+        return 0
+    )
+
+    if typeof(channel.messages) != "array" (
+        return 0
+    )
+
+    array messages = channel.messages.assert(array)
+    if messages.len == 0 (
+        return 0
+    )
+
+    auto lastMsg = messages[messages.len]
+    if typeof(lastMsg) == "object" (
+        object message = lastMsg.assert(object)
+        return message.timestamp.toNum()
+    )
+
+    return 0
+)
+
+def formatSortedChannelsForAPI(object user) array (
+    array formattedChannels = []
+    formattedChannels.append(getCmdsChannel())
+    formattedChannels.append({
+        "type": "separator",
+        "size": 10,
+        "permissions": {
+            "view": [
+                "user"
+            ]
+        }
+    })
+
+    if typeof(user.channels) != "array" (
+        return formattedChannels
+    )
+
+    array channels = user.channels.assert(array)
+    array channelData = []
+
+    for i channels.len (
+        string channelId = channels[i].toStr()
+        object ch = getChannel(channelId)
+        if ch != null (
+            int lastTimestamp = getLastMessageTimestamp(ch)
+            object data = {
+                channelId: channelId,
+                channel: ch,
+                timestamp: lastTimestamp
+            }
+            channelData.append(data)
+        )
+    )
+
+    while channelData.len > 0 (
+        int highestIndex = 0
+        int highestTimestamp = 0
+        for i channelData.len (
+            auto data = channelData[i]
+            if typeof(data) == "object" (
+                object channelDataItem = data.assert(object)
+                int ts = channelDataItem.timestamp
+                if ts > highestTimestamp (
+                    highestTimestamp = ts
+                    highestIndex = i
+                )
+            )
+        )
+        auto bestData = channelData[highestIndex]
+        if typeof(bestData) == "object" (
+            object bestDataObj = bestData.assert(object)
+            formattedChannels.append(formatChannelForAPI(bestDataObj.channel.assert(object), user))
+        )
+        array newChannelData = []
+        for i channelData.len (
+            if i != highestIndex (
+                newChannelData.append(channelData[i])
+            )
+        )
+        channelData = newChannelData
+    )
+
+    return formattedChannels
+)
+
+def formatMessageForAPI(object message) object (
+    object result = {
+        id: message.id.toStr(),
+        user: message.user.toStr(),
+        content: message.content.toStr(),
+        timestamp: message.timestamp,
+        type: "message",
+        pinned: false
+    }
+    if typeof(message.edited) != "null" (
+        result.edited = message.edited
+    )
+    if typeof(message.edited_at) != "null" (
+        result.edited_at = message.edited_at
+    )
+    return result
+)

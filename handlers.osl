@@ -1,0 +1,807 @@
+def handleAuth(*Connection conn, object msg) (
+    string token = msg.validator.toStr()
+    if token == "" (
+        conn.Send(authErrorMsg("missing token"))
+        return
+    )
+    object resp = requests.Get("https://api.rotur.dev/validate?key=originChats-dms&v=" ++ token)
+
+    if !resp.success (
+        conn.Send(authErrorMsg("failed to validate token"))
+        return
+    )
+
+    object json = resp.body.toStr().JsonParse()
+    if json.error != null (
+        conn.Send(authErrorMsg(json.error.toStr()))
+        return
+    )
+    if !json.valid (
+        conn.Send(authErrorMsg("invalidate token"))
+        return
+    )
+    
+    string username = token.split(",")[1].toStr().toLower()
+    lock.Lock("users")
+    users[conn] = username
+    lock.Unlock("users")
+    conn.Set("username", username)
+    conn.Set("ratelimit_timestamp", timestamp.toNum())
+    conn.Set("ratelimit_count", 0)
+
+    object user = getUser(username)
+
+    conn.Send({
+        cmd: "auth_success",
+        val: "Authentication successful"
+    })
+    conn.Send({
+        cmd: "ready",
+        user: {
+            username,
+            roles: ["user"] ++ user.channels.assert(array)
+        }
+    })
+)
+
+def handleChannelsGet(*Connection conn, object msg) (
+    string username = getUsername(conn)
+    if !requireAuth(conn, username) (
+        return
+    )
+    if !checkReadRequestLimit(conn) (
+        return
+    )
+    object user = getUser(username)
+
+    array formattedChannels = formatSortedChannelsForAPI(user)
+
+    conn.Send({
+        cmd: "channels_get",
+        val: formattedChannels
+    })
+)
+
+def populateUserRoles(array channels, string excludeUsername, array includeUsernames) array (
+    array usersList = []
+    array userNames = []
+
+    for i channels.len (
+        string channelId = channels[i].toStr()
+        object ch = getChannel(channelId)
+        if ch != null and typeof(ch.members) == "array" (
+            array members = ch.members.assert(array)
+            for j members.len (
+                string member = members[j].toStr()
+                string memberLower = member.toLower()
+
+                if memberLower == excludeUsername.toLower() (
+                    continue
+                )
+                
+                if userNames.contains(memberLower) (
+                    continue
+                )
+                if includeUsernames != null and includeUsernames.len > 0 and !includeUsernames.contains(member) (
+                    continue
+                )
+                object memberUser = getUser(member)
+                array memberChannels = []
+                if typeof(memberUser.channels) == "array" (
+                    array mc = memberUser.channels.assert(array)
+                    for k mc.len (
+                        string mcChannelId = mc[k].toStr()
+                        if channels.contains(mcChannelId) (
+                            memberChannels.append(mcChannelId)
+                        )
+                    )
+                )
+                usersList.append({
+                    username: member,
+                    color: null,
+                    roles: ["user"] ++ memberChannels
+                })
+                userNames.append(memberLower)
+            )
+        )
+    )
+    return usersList
+)
+
+def handleUsersList(*Connection conn, object msg) (
+    string username = getUsername(conn)
+    if !requireAuth(conn, username) (
+        return
+    )
+    if !checkReadRequestLimit(conn) (
+        return
+    )
+    object user = getUser(username)
+
+    if typeof(user.channels) != "array" (
+        conn.Send({
+            cmd: "users_list",
+            users: []
+        })
+        return
+    )
+
+    array channels = user.channels.assert(array)
+    array usersList = populateUserRoles(channels, username, null)
+
+    conn.Send({
+        cmd: "users_list",
+        users: usersList
+    })
+)
+
+def handleUsersOnline(*Connection conn, object msg) (
+    string username = getUsername(conn)
+    if !requireAuth(conn, username) (
+        return
+    )
+    if !checkReadRequestLimit(conn) (
+        return
+    )
+    object user = getUser(username)
+
+    if typeof(user.channels) != "array" (
+        conn.Send({
+            cmd: "users_online",
+            users: []
+        })
+        return
+    )
+
+    array channels = user.channels.assert(array)
+    array onlineUsernames = []
+
+    auto connections = server.GetConnections()
+    for i connections.len (
+        auto memberConn = connections[i].assert(*Connection)
+        auto connUsername = memberConn.Get("username")
+        if connUsername != null and connUsername.toStr() != "" (
+            onlineUsernames.append(connUsername.toStr())
+        )
+    )
+
+    array usersList = populateUserRoles(channels, username, onlineUsernames)
+    usersList.append({
+        username: username,
+        color: null,
+        roles: ["user"] ++ user.channels.assert(array)
+    })
+
+    conn.Send({
+        cmd: "users_online",
+        users: usersList
+    })
+)
+
+def handleMessagesGet(*Connection conn, object msg) (
+    string username = getUsername(conn)
+    if !requireAuth(conn, username) (
+        return
+    )
+    if !checkReadRequestLimit(conn) (
+        return
+    )
+    string channel = msg.channel.toStr()
+
+    if channel == "cmds" (
+        conn.Send({
+            channel,
+            cmd: "messages_get",
+            messages: [{
+                user: "rotur",
+                content: "**Available Commands:**\n\n`dm add <username>` - Add a DM channel with another user\nExample: dm add Mist\n\n`group create <name> <user1 user2 ...>` - Create a group channel with optional members\nExample: /group create MyGroup Mist add\n\n`group add <channel_name> <username>` - Add a user to an existing group\nExample: /group add MyGroup Mist",
+                timestamp,
+                edited: false
+            }]
+        })
+        return
+    )
+
+    object ch = getChannel(channel)
+    if ch == null (
+        conn.Send({
+            cmd: "error",
+            val: "Channel not found"
+        })
+        return
+    )
+
+    object user = getUser(username)
+    if typeof(user.channels) != "array" (
+        conn.Send({
+            cmd: "error",
+            val: "You are not a member of this channel"
+        })
+        return
+    )
+
+    array channels = user.channels.assert(array)
+    if !channels.contains(channel) (
+        conn.Send({
+            cmd: "error",
+            val: "You are not a member of this channel"
+        })
+        return
+    )
+
+    array messages = getChannelMessages(channel)
+    array formattedMessages = []
+    int len = messages.len
+    int i = 1
+    while i <= len (
+        formattedMessages.append(formatMessageForAPI(messages[i].assert(object)))
+        i = i + 1
+    )
+
+    conn.Send({
+        channel,
+        cmd: "messages_get",
+        messages: formattedMessages
+    })
+)
+
+def handleDMAddCommand(*Connection conn, string targetUsername) (
+    string username = getUsername(conn)
+    if !requireAuth(conn, username) (
+        return
+    )
+    if !checkRateLimit(conn) (
+        return
+    )
+    
+    if targetUsername == username (
+        conn.Send({
+            cmd: "error",
+            val: "Cannot create DM with yourself"
+        })
+        return
+    )
+
+    if !userExists(targetUsername) (
+        conn.Send({
+            cmd: "error",
+            val: "User '" ++ targetUsername ++ "' does not exist in the database"
+        })
+        return
+    )
+
+    createDMChannel(username, targetUsername)
+    
+    conn.Send({
+        cmd: "info",
+        val: "Added DM channel with " ++ targetUsername
+    })
+
+    handleChannelsGet(conn, {})
+)
+
+def handleGroupCreateCommand(*Connection conn, array parts) (
+    string username = getUsername(conn)
+    if !requireAuth(conn, username) (
+        return
+    )
+    if !checkRateLimit(conn) (
+        return
+    )
+    
+    if parts.len < 4 (
+        conn.Send({
+            cmd: "error",
+            val: "Usage: /group create <name> <user1 user2 ...>"
+        })
+        return
+    )
+
+    string name = parts[3].toStr()
+    array members = []
+    if parts.len >= 4 (
+        int i = 4
+        int len = parts.len
+        while i <= len (
+            string member = parts[i].toStr()
+            if member != username (
+                members.append(member)
+            )
+            i = i + 1
+        )
+    )
+
+    array nonexistentUsers = []
+    int memLen = members.len
+    int j = 1
+    while j <= memLen (
+        string member = members[j].toStr()
+        if !userExists(member) (
+            nonexistentUsers.append(member)
+        )
+        j = j + 1
+    )
+
+    if nonexistentUsers.len > 0 (
+        string errorMsg = "Failed to create group: the following users do not exist in the database: "
+        int errorLen = nonexistentUsers.len
+        int k = 1
+        while k <= errorLen (
+            errorMsg = errorMsg ++ nonexistentUsers[k].toStr()
+            if k < errorLen (
+                errorMsg = errorMsg ++ ", "
+            )
+            k = k + 1
+        )
+        conn.Send({
+            cmd: "error",
+            val: errorMsg
+        })
+        return
+    )
+
+    createGroupChannel(username, name, members)
+    
+    string successMsg = "Created group '" ++ name ++ "'"
+    if members.len > 0 (
+        successMsg = successMsg ++ " with " ++ members.len.toStr() ++ " member(s)"
+    )
+    
+    conn.Send({
+        cmd: "info",
+        val: successMsg
+    })
+
+    handleChannelsGet(conn, {})
+)
+
+def handleGroupAddCommand(*Connection conn, array parts) (
+    string username = getUsername(conn)
+    if !requireAuth(conn, username) (
+        return
+    )
+    if !checkRateLimit(conn) (
+        return
+    )
+    
+    if parts.len < 5 (
+        conn.Send({
+            cmd: "error",
+            val: "Usage: /group add <channel_name> <username>"
+        })
+        return
+    )
+
+    string channelName = parts[3].toStr()
+    string targetUsername = parts[4].toStr()
+
+    if !userExists(targetUsername) (
+        conn.Send({
+            cmd: "error",
+            val: "User '" ++ targetUsername ++ "' does not exist in the database"
+        })
+        return
+    )
+
+    object user = getUser(username)
+    
+    if typeof(user.channels) != "array" (
+        conn.Send({
+            cmd: "error",
+            val: "No channels found"
+        })
+        return
+    )
+
+    array channels = user.channels.assert(array)
+    string channelId = ""
+    for i channels.len (
+        string c = channels[i].toStr()
+        auto channel = getChannel(c)
+        if channel.type.toStr() == "group" and channel.name.toStr() == channelName (
+            channelId = c
+        )
+    )
+
+    if channelId == "" (
+        conn.Send({
+            cmd: "error",
+            val: "Group '" ++ channelName ++ "' not found"
+        })
+        return
+    )
+
+    bool success = addUserToGroupChannel(channelId, targetUsername)
+    if success (
+        conn.Send({
+            cmd: "info",
+            val: "Added " ++ targetUsername ++ " to group"
+        })
+    ) else (
+        conn.Send({
+            cmd: "error",
+            val: "Failed to add user to group (may already be a member)"
+        })
+    )
+)
+
+def handleProcessCommand(*Connection conn, string content, string channel) (
+    if channel == "cmds" (
+        return
+    )
+
+    array parts = content.split(" ")
+    int len = parts.len
+
+    if len < 2 (
+        return
+    )
+
+    string cmdRoot = parts[1].toStr()
+    string cmdType = ""
+    if len >= 3 (
+        cmdType = parts[2].toStr()
+    )
+
+    if cmdRoot != "dm" and cmdRoot != "group" (
+        return
+    )
+
+    if cmdRoot == "dm" (
+        if cmdType != "add" (
+            return
+        )
+        if len < 3 (
+            conn.Send({
+                cmd: "error",
+                val: "Usage: /dm add <username>"
+            })
+            return
+        )
+        handleDMAddCommand(conn, parts[3].toStr())
+    ) else if cmdRoot == "group" (
+        if cmdType == "create" (
+            handleGroupCreateCommand(conn, parts)
+        ) else if cmdType == "add" (
+            handleGroupAddCommand(conn, parts)
+        )
+    )
+)
+
+def handleMessageNew(*Connection conn, object msg) (
+    string channel = msg.channel.toStr()
+    string content = msg.content.toStr()
+
+    if content.startsWith("/") (
+        handleProcessCommand(conn, content, channel)
+        return
+    )
+
+    string username = getUsername(conn)
+    if !requireAuth(conn, username) (
+        return
+    )
+    if !checkRateLimit(conn) (
+        return
+    )
+
+    if channel == "cmds" (
+        array parts = content.split(" ")
+        string cmdType = parts[1]
+        switch cmdType (
+            case "dm"
+                if parts.len < 3 (
+                    conn.Send({
+                        cmd: "error",
+                        val: "Usage: dm add <username>"
+                    })
+                    return
+                )
+                handleDMAddCommand(conn, parts[3].toStr())
+            case "group"
+                if parts.len < 4 (
+                    conn.Send({
+                        cmd: "error",
+                        val: "Usage: group create <name> <user1 user2 ...>"
+                    })
+                    return
+                )
+                handleGroupCreateCommand(conn, parts)
+            case "group_add"
+                if parts.len < 5 (
+                    conn.Send({
+                        cmd: "error",
+                        val: "Usage: group add <channel_name> <username>"
+                    })
+                    return
+                )
+                handleGroupAddCommand(conn, parts)
+        )
+        return
+    )
+
+    if !verifyChannelMember(conn, username, channel) (
+        return
+    )
+
+    object message = sendChannelMessage(channel, content, username)
+    if message == null (
+        conn.Send({
+            cmd: "error",
+            val: "Failed to send message"
+        })
+        return
+    )
+
+    sendMessageToAllUsersInChannel(conn, channel, {
+        cmd: "message_new",
+        message: formatMessageForAPI(message),
+        channel: channel,
+        global: true
+    })
+
+    sendUpdatedChannelsToChannelMembers(channel)
+)
+
+def handleDMCreate(*Connection conn, object msg) (
+    string username = getUsername(conn)
+    if !requireAuth(conn, username) (
+        return
+    )
+    if !checkRateLimit(conn) (
+        return
+    )
+
+    string targetUsername = msg.targetUsername.toStr()
+
+    if targetUsername == username (
+        conn.Send({
+            cmd: "error",
+            val: "Cannot create DM with yourself"
+        })
+        return
+    )
+
+    if !userExists(targetUsername) (
+        conn.Send({
+            cmd: "error",
+            val: "User '" ++ targetUsername ++ "' does not exist in the database"
+        })
+        return
+    )
+
+    createDMChannel(username, targetUsername)
+
+    handleChannelsGet(conn, {})
+)
+
+def sendMessageToAllUsersInChannel(*Connection conn, string channel, object message) (
+    object ch = getChannel(channel)
+    if ch != null and typeof(ch.members) == "array" (
+        array members = ch.members.assert(array)
+        auto connections = server.GetConnections()
+        for i connections.len (
+            auto memberConn = connections[i].assert(*Connection)
+            if !members.contains(memberConn.Get("username").toStr().toLower()) (
+                continue
+            )
+            memberConn.Send(message)
+        )
+    )
+)
+
+def sendUpdatedChannelsToChannelMembers(string channel) (
+    object ch = getChannel(channel)
+    if ch != null and typeof(ch.members) == "array" (
+        array members = ch.members.assert(array)
+        auto connections = server.GetConnections()
+        for i connections.len (
+            auto memberConn = connections[i]
+            if typeof(memberConn) == "*Connection" (
+                auto conn = memberConn.assert(*Connection)
+                string username = conn.Get("username").toStr().toLower()
+                if members.contains(username) and userExists(username) (
+                    object user = getUser(username)
+                    array formattedChannels = formatSortedChannelsForAPI(user)
+                    conn.Send({
+                        cmd: "channels_get",
+                        val: formattedChannels
+                    })
+                )
+            )
+        )
+    )
+)
+
+def handleTyping(*Connection conn, object msg) (
+    string channel = msg.channel.toStr()
+    string username = getUsername(conn)
+    if !requireAuth(conn, username) (
+        return
+    )
+    if !checkRateLimit(conn) (
+        return
+    )
+    if !verifyChannelMember(conn, username, channel) (
+        return
+    )
+
+    sendMessageToAllUsersInChannel(conn, channel, {
+        cmd: "typing",
+        user: username,
+        channel: channel
+    })
+)
+
+def handleMessageEdit(*Connection conn, object msg) (
+    string channel = msg.channel.toStr()
+    string messageId = msg.messageId.toStr()
+    string newContent = msg.content.toStr()
+    string username = getUsername(conn)
+    if !requireAuth(conn, username) (
+        return
+    )
+    if !checkRateLimit(conn) (
+        return
+    )
+    if !verifyChannelMember(conn, username, channel) (
+        return
+    )
+
+    object message = getMessage(channel, messageId)
+    if message == null (
+        conn.Send({
+            cmd: "error",
+            val: "Message not found"
+        })
+        return
+    )
+
+    if message.user.toStr() != username.toLower() (
+        conn.Send({
+            cmd: "error",
+            val: "You can only edit your own messages"
+        })
+        return
+    )
+
+    bool success = editChannelMessage(channel, messageId, newContent, username)
+    if !success (
+        conn.Send({
+            cmd: "error",
+            val: "Failed to edit message"
+        })
+        return
+    )
+
+    object updatedMessage = getMessage(channel, messageId)
+    sendMessageToAllUsersInChannel(conn, channel, {
+        cmd: "message_edit",
+        message: formatMessageForAPI(updatedMessage),
+        channel: channel,
+        global: true
+    })
+)
+
+def handleMessageDelete(*Connection conn, object msg) (
+    string channel = msg.channel.toStr()
+    string messageId = msg.messageId.toStr()
+    string username = getUsername(conn)
+    if !requireAuth(conn, username) (
+        return
+    )
+    if !checkRateLimit(conn) (
+        return
+    )
+    if !verifyChannelMember(conn, username, channel) (
+        return
+    )
+
+    object message = getMessage(channel, messageId)
+    if message == null (
+        conn.Send({
+            cmd: "error",
+            val: "Message not found"
+        })
+        return
+    )
+
+    if message.user.toStr() != username.toLower() (
+        conn.Send({
+            cmd: "error",
+            val: "You can only delete your own messages"
+        })
+        return
+    )
+
+    bool success = deleteChannelMessage(channel, messageId, username)
+    if !success (
+        conn.Send({
+            cmd: "error",
+            val: "Failed to delete message"
+        })
+        return
+    )
+
+    sendMessageToAllUsersInChannel(conn, channel, {
+        cmd: "message_delete",
+        messageId: messageId,
+        channel: channel,
+        global: true
+    })
+
+    sendUpdatedChannelsToChannelMembers(channel)
+)
+
+def getUsername(*Connection conn) string (
+    auto val = conn.Get("username")
+    if val == null (
+        return ""
+    )
+    return val.toStr()
+)
+
+def isAuthenticated(*Connection conn, string username) bool (
+    if username == "" (
+        return false
+    )
+    if !userExists(username) (
+        return false
+    )
+    return true
+)
+
+def requireAuth(*Connection conn, string username) bool (
+    if !isAuthenticated(conn, username) (
+        conn.Send(authErrorMsg("Authentication required"))
+        return false
+    )
+    return true
+)
+
+def checkRateLimit(*Connection conn) bool (
+    return checkRateLimitWithParams(conn, 60, 60000)
+)
+
+def checkReadRequestLimit(*Connection conn) bool (
+    return checkRateLimitWithParams(conn, 120, 60000)
+)
+
+def checkRateLimitWithParams(*Connection conn, int maxRequests, int window) bool (
+    number now = timestamp.toNum()
+    number lastTime = conn.Get("ratelimit_timestamp").toNum()
+    number count = conn.Get("ratelimit_count").toNum()
+
+    if now - lastTime > window (
+        conn.Set("ratelimit_timestamp", now)
+        conn.Set("ratelimit_count", 0)
+        return true
+    )
+
+    if count >= maxRequests (
+        conn.Send({
+            cmd: "error",
+            val: "Rate limit exceeded. Please slow down."
+        })
+        return false
+    )
+
+    conn.Set("ratelimit_count", count + 1)
+    return true
+)
+
+def verifyChannelMember(*Connection conn, string username, string channelId) bool (
+    object user = getUser(username)
+    if typeof(user.channels) != "array" (
+        return false
+    )
+    array channels = user.channels.assert(array)
+    if !channels.contains(channelId) (
+        conn.Send({
+            cmd: "error",
+            val: "You are not a member of this channel"
+        })
+        return false
+    )
+    return true
+)

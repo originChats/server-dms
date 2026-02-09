@@ -1,0 +1,86 @@
+import "osl/ws"
+import "osl/requests"
+import "osl/fs"
+import "osl/lock"
+
+import "math/rand"
+
+import "./messages.osl"
+import "./handlers.osl"
+import "./db.osl"
+
+"*Server" server = nil
+
+object users = {}
+
+def newConnection(*Connection conn) (
+    log "New connection"
+    conn.Send({
+        "cmd": "handshake",
+        "val": {
+            server: {
+                name: "DMs",
+                icon: "https://originchats.mistium.com/dms.png",
+                type: "direct",
+                url: "wss://dms.mistium.com",
+                owner: {
+                    name: "Mist"
+                }
+            },
+            limits: {
+                post_content: 2000
+            },
+            version: "1.1.0",
+            validator_key: "originChats-dms"
+        }
+    })
+)
+
+def handleMessage(*Connection conn, string message) (
+    auto rawMsg = message.JsonParse()
+
+    if typeof(rawMsg) != "object" (
+        return
+    )
+    object msg = rawMsg.assert(object)
+
+    string cmd = msg.cmd.toStr()
+    log cmd ++ " from " ++ getUsername(conn)
+    switch cmd (
+        case "auth"
+            handleAuth(conn, msg)
+        case "channels_get"
+            handleChannelsGet(conn, msg)
+        case "users_list"
+            handleUsersList(conn, msg)
+        case "users_online"
+            handleUsersOnline(conn, msg)
+        case "messages_get"
+            handleMessagesGet(conn, msg)
+        case "message_new"
+            handleMessageNew(conn, msg)
+        case "message_edit"
+            handleMessageEdit(conn, msg)
+        case "message_delete"
+            handleMessageDelete(conn, msg)
+        case "dm_create"
+            handleDMCreate(conn, msg)
+        case "typing"
+            handleTyping(conn, msg)
+    )
+)
+
+def closeConnection(*Connection conn) (
+    log "Connection closed"
+    users.delete(conn)
+)
+
+def main() (
+    server = ws.NewServer(":5607", "/")
+
+    server.OnConnect(newConnection)
+    server.OnMessage(handleMessage)
+    server.OnDisconnect(closeConnection)
+
+    server.Start()
+)
