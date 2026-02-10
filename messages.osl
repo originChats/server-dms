@@ -30,16 +30,16 @@ def formatChannelForAPI(object channel, object userChannels) object (
             if typeof(channel.members) == "array" (
                 array members = channel.members.assert(array)
                 if members.len >= 2 (
-                    string currentUser = userChannels.username.toStr()
-                    string otherUser = ""
+                    string currentId = userChannels.id.toStr()
+                    string otherId = ""
                     for i members.len (
                         string m = members[i].toStr()
-                        if m != currentUser (
-                            otherUser = m
+                        if m != currentId (
+                            otherId = m
                         )
                     )
-                    name = otherUser
-                    description = "Direct message with " ++ otherUser
+                    name = getUsernameById(otherId)
+                    description = "Direct message with " ++ name
                 )
             )
         case "group"
@@ -180,9 +180,15 @@ def formatSortedChannelsForAPI(object user) array (
     return formattedChannels
 )
 def formatMessageForAPI(object message) object (
+    string userId = message.user.toStr()
+    string username = getUsernameById(userId)
+    if username == "" (
+        username = userId
+    )
+    
     object result = {
         id: message.id.toStr(),
-        user: message.user.toStr(),
+        user: username,
         content: message.content.toStr(),
         timestamp: message.timestamp,
         type: "message",

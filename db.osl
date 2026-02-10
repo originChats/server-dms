@@ -1,17 +1,46 @@
 import "osl/fs"
 
-def userExists(string username) bool (
-    string uname = username.toLower()
-    auto path = "db/users/" ++ uname ++ ".json"
+def userExists(string id) bool (
+    auto path = "db/users/" ++ id ++ ".json"
     return fs.Exists(path)
 )
 
-def getUser(string username) object (
-    string uname = username.toLower()
-    auto path = "db/users/" ++ uname ++ ".json"
+def userExistsByUsername(string username) bool (
+    return getIdByUsername(username) != ""
+)
+
+def getIdByUsername(string username) string (
+    string path = "db/users/"
+    array files = fs.ReadDir(path)
+    int i = 1
+    while i <= files.len (
+        string fname = files[i].toStr()
+        if fname.endsWith(".json") (
+            string id = fname.trim(1, -6)
+            object user = getUser(id)
+            if user != null and user.username.toStr().toLower() == username.toLower() (
+                return id
+            )
+        )
+        i = i + 1
+    )
+    return ""
+)
+
+def getUsernameById(string id) string (
+    object user = getUser(id)
+    if user == null (
+        return ""
+    )
+    return user.username.toStr()
+)
+
+def getUser(string id) object (
+    auto path = "db/users/" ++ id ++ ".json"
     if !fs.Exists(path) (
         object newObject = {
-            username: uname,
+            id: id,
+            username: "",
             channels: []
         }
         fs.WriteFile(path, newObject.JsonStringify())
@@ -21,21 +50,21 @@ def getUser(string username) object (
     auto content = fs.ReadFile(path).JsonParse()
     if typeof(content) != "object" (
         return {
-            username: uname,
+            id: id,
+            username: "",
             channels: []
         }
     )
     return content.assert(object)
 )
 
-def saveUser(string username, object user) (
-    string uname = username.toLower()
-    auto path = "db/users/" ++ uname ++ ".json"
+def saveUser(string id, object user) (
+    auto path = "db/users/" ++ id ++ ".json"
     fs.WriteFile(path, user.JsonStringify())
 )
 
-def addChannelToUser(string username, string channelId) (
-    object user = getUser(username)
+def addChannelToUser(string id, string channelId) (
+    object user = getUser(id)
 
     if typeof(user.channels) != "array" (
         user.channels = []
@@ -45,12 +74,12 @@ def addChannelToUser(string username, string channelId) (
     if !channels.contains(channelId) (
         channels.append(channelId)
         user.channels = channels
-        saveUser(username, user)
+        saveUser(id, user)
     )
 )
 
-def removeChannelFromUser(string username, string channelId) (
-    object user = getUser(username)
+def removeChannelFromUser(string id, string channelId) (
+    object user = getUser(id)
 
     if typeof(user.channels) != "array" (
         return
@@ -68,7 +97,7 @@ def removeChannelFromUser(string username, string channelId) (
         i = i + 1
     )
     user.channels = newChannels
-    saveUser(username, user)
+    saveUser(id, user)
 )
 
 def getChannel(string channelId) object (
@@ -104,9 +133,6 @@ def findExistingDMChannel(string user1, string user2) string (
         return ""
     )
 
-    string lowerUser1 = user1.toLower()
-    string lowerUser2 = user2.toLower()
-
     array channels = u1.channels.assert(array)
     int len = channels.len
     int i = 1
@@ -116,21 +142,7 @@ def findExistingDMChannel(string user1, string user2) string (
         if ch.type.toStr() == "dm" (
             if typeof(ch.members) == "array" (
                 array members = ch.members.assert(array)
-                int memLen = members.len
-                int j = 1
-                bool hasUser1 = false
-                bool hasUser2 = false
-                while j <= memLen (
-                    string member = members[j].toStr()
-                    if member == lowerUser1 (
-                        hasUser1 = true
-                    )
-                    if member == lowerUser2 (
-                        hasUser2 = true
-                    )
-                    j = j + 1
-                )
-                if hasUser1 and hasUser2 (
+                if members.contains(user1) and members.contains(user2) (
                     return channelId
                 )
             )
@@ -151,7 +163,7 @@ def createDMChannel(string user1, string user2) string (
         id: channelId,
         type: "dm",
         name: channelId,
-        members: [user1.toLower(), user2.toLower()],
+        members: [user1, user2],
         created_at: timestamp / 1000
     }
     saveChannel(channelId, channel)
@@ -162,12 +174,18 @@ def createDMChannel(string user1, string user2) string (
 
 def createGroupChannel(string creator, string name, array members) string (
     string channelId = randomString(10)
-    array allMembers = [creator.toLower()]
+    array allMembers = [creator]
+    array memberIds = []
     int len = members.len
     int i = 1
     while i <= len (
-        allMembers.append(members[i].toStr().toLower())
-        addChannelToUser(members[i].toStr(), channelId)
+        string username = members[i].toStr()
+        string memberId = getIdByUsername(username)
+        if memberId != "" (
+            allMembers.append(memberId)
+            memberIds.append(memberId)
+            addChannelToUser(memberId, channelId)
+        )
         i = i + 1
     )
     addChannelToUser(creator, channelId)
@@ -178,14 +196,14 @@ def createGroupChannel(string creator, string name, array members) string (
         name: name,
         display_name: channelId,
         members: allMembers,
-        creator: creator.toLower(),
+        creator: creator,
         created_at: timestamp / 1000
     }
     saveChannel(channelId, channel)
     return channelId
 )
 
-def addUserToGroupChannel(string channelId, string username) bool (
+def addUserToGroupChannel(string channelId, string id) bool (
     object ch = getChannel(channelId)
     if ch == null (
         return false
@@ -194,25 +212,23 @@ def addUserToGroupChannel(string channelId, string username) bool (
         return false
     )
     
-    string lowerUsername = username.toLower()
-    
     if typeof(ch.members) != "array" (
         ch.members = []
     )
     
     array members = ch.members.assert(array)
-    if members.contains(lowerUsername) (
+    if members.contains(id) (
         return false
     )
     
-    members.append(lowerUsername)
+    members.append(id)
     ch.members = members
     saveChannel(channelId, ch)
-    addChannelToUser(username, channelId)
+    addChannelToUser(id, channelId)
     return true
 )
 
-def sendChannelMessage(string channelId, string content, string username) object (
+def sendChannelMessage(string channelId, string content, string id) object (
     object ch = getChannel(channelId)
     if ch == null (
         return null
@@ -223,7 +239,7 @@ def sendChannelMessage(string channelId, string content, string username) object
     )
 
     array members = ch.members.assert(array)
-    if !members.contains(username.toLower()) (
+    if !members.contains(id) (
         log "User not in channel"
         return null
     )
@@ -235,7 +251,7 @@ def sendChannelMessage(string channelId, string content, string username) object
     string messageId = randomString(10)
     object message = {
         id: messageId,
-        user: username.toLower(),
+        user: id,
         content: content,
         timestamp: timestamp / 1000,
         type: "message"
@@ -261,7 +277,7 @@ def getChannelMessages(string channelId) array (
     return ch.messages.assert(array)
 )
 
-def editChannelMessage(string channelId, string messageId, string newContent, string username) bool (
+def editChannelMessage(string channelId, string messageId, string newContent, string id) bool (
     object ch = getChannel(channelId)
     if ch == null (
         return false
@@ -277,7 +293,7 @@ def editChannelMessage(string channelId, string messageId, string newContent, st
         if typeof(msg) == "object" (
             object message = msg.assert(object)
             if message.id.toStr() == messageId (
-                if message.user.toStr() != username.toLower() (
+                if message.user.toStr() != id (
                     return false
                 )
                 message.content = newContent
@@ -293,7 +309,7 @@ def editChannelMessage(string channelId, string messageId, string newContent, st
     return false
 )
 
-def deleteChannelMessage(string channelId, string messageId, string username) bool (
+def deleteChannelMessage(string channelId, string messageId, string id) bool (
     object ch = getChannel(channelId)
     if ch == null (
         return false
@@ -311,7 +327,7 @@ def deleteChannelMessage(string channelId, string messageId, string username) bo
         if typeof(msg) == "object" (
             object message = msg.assert(object)
             if !deleted and message.id.toStr() == messageId (
-                if message.user.toStr() != username.toLower() (
+                if message.user.toStr() != id (
                     return false
                 )
                 deleted = true

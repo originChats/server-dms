@@ -70,11 +70,12 @@ def handleMessage(*Connection conn, string message) (
 )
 
 def closeConnection(*Connection conn) (
+    string id = getUserId(conn)
     string username = getUsername(conn)
     log "Connection closed for " ++ username
     users.delete(conn)
-    if username != "" (
-        broadcastUserDisconnect(username)
+    if id != "" (
+        broadcastUserDisconnect(id)
     )
 )
 

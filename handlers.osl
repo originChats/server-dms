@@ -21,23 +21,27 @@ def handleAuth(*Connection conn, object msg) (
         return
     )
     
-    string username = token.split(",")[1].toStr().toLower()
+    string id = json.id.toStr()
+    string username = json.username.toStr()
+    
     lock.Lock("users")
-    users[conn] = username
+    users[conn] = id
     lock.Unlock("users")
+    conn.Set("id", id)
     conn.Set("username", username)
     conn.Set("ratelimit_timestamp", timestamp.toNum())
     conn.Set("ratelimit_count", 0)
 
-    string path = "db/users/" ++ username.toLower() ++ ".json"
+    string path = "db/users/" ++ id ++ ".json"
     if !fs.Exists(path) (
         fs.WriteFile(path, {
+            id: id,
             username: username,
             channels: []
         })
     )
 
-    object user = getUser(username)
+    object user = getUser(id)
 
     conn.Send({
         cmd: "auth_success",
@@ -51,7 +55,7 @@ def handleAuth(*Connection conn, object msg) (
         }
     })
 
-    broadcastUserConnect(username, user.channels.assert(array))
+    broadcastUserConnect(id, username, user.channels.assert(array))
 )
 
 def handleChannelsGet(*Connection conn, object msg) (
@@ -69,8 +73,8 @@ def handleChannelsGet(*Connection conn, object msg) (
         })
         return
     )
-    string username = getUsername(conn)
-    object user = getUser(username)
+    string id = getUserId(conn)
+    object user = getUser(id)
 
     array formattedChannels = formatSortedChannelsForAPI(user)
 
@@ -80,9 +84,9 @@ def handleChannelsGet(*Connection conn, object msg) (
     })
 )
 
-def populateUserRoles(array channels, string excludeUsername, array includeUsernames) array (
+def populateUserRoles(array channels, string excludeId, array includeIds) array (
     array usersList = []
-    array userNames = []
+    array userIds = []
 
     for i channels.len (
         string channelId = channels[i].toStr()
@@ -91,16 +95,15 @@ def populateUserRoles(array channels, string excludeUsername, array includeUsern
             array members = ch.members.assert(array)
             for j members.len (
                 string member = members[j].toStr()
-                string memberLower = member.toLower()
 
-                if memberLower == excludeUsername.toLower() (
+                if member == excludeId (
                     continue
                 )
                 
-                if userNames.contains(memberLower) (
+                if userIds.contains(member) (
                     continue
                 )
-                if includeUsernames != null and includeUsernames.len > 0 and !includeUsernames.contains(member) (
+                if includeIds != null and includeIds.len > 0 and !includeIds.contains(member) (
                     continue
                 )
                 object memberUser = getUser(member)
@@ -115,11 +118,11 @@ def populateUserRoles(array channels, string excludeUsername, array includeUsern
                     )
                 )
                 usersList.append({
-                    username: member,
+                    username: memberUser.username.toStr(),
                     color: null,
                     roles: ["user"] ++ memberChannels
                 })
-                userNames.append(memberLower)
+                userIds.append(member)
             )
         )
     )
@@ -127,14 +130,14 @@ def populateUserRoles(array channels, string excludeUsername, array includeUsern
 )
 
 def handleUsersList(*Connection conn, object msg) (
-    string username = getUsername(conn)
+    string id = getUserId(conn)
     if !requireAuth(conn) (
         return
     )
     if !checkReadRequestLimit(conn) (
         return
     )
-    object user = getUser(username)
+    object user = getUser(id)
 
     if typeof(user.channels) != "array" (
         conn.Send({
@@ -145,7 +148,7 @@ def handleUsersList(*Connection conn, object msg) (
     )
 
     array channels = user.channels.assert(array)
-    array usersList = populateUserRoles(channels, username, null)
+    array usersList = populateUserRoles(channels, id, null)
 
     conn.Send({
         cmd: "users_list",
@@ -154,14 +157,14 @@ def handleUsersList(*Connection conn, object msg) (
 )
 
 def handleUsersOnline(*Connection conn, object msg) (
-    string username = getUsername(conn)
+    string id = getUserId(conn)
     if !requireAuth(conn) (
         return
     )
     if !checkReadRequestLimit(conn) (
         return
     )
-    object user = getUser(username)
+    object user = getUser(id)
 
     if typeof(user.channels) != "array" (
         conn.Send({
@@ -172,20 +175,20 @@ def handleUsersOnline(*Connection conn, object msg) (
     )
 
     array channels = user.channels.assert(array)
-    array onlineUsernames = []
+    array onlineIds = []
 
     auto connections = server.GetConnections()
     for i connections.len (
         auto memberConn = connections[i].assert(*Connection)
-        auto connUsername = memberConn.Get("username")
-        if connUsername != null and connUsername.toStr() != "" (
-            onlineUsernames.append(connUsername.toStr())
+        auto connId = memberConn.Get("id")
+        if connId != null and connId.toStr() != "" (
+            onlineIds.append(connId.toStr())
         )
     )
 
-    array usersList = populateUserRoles(channels, username, onlineUsernames)
+    array usersList = populateUserRoles(channels, id, onlineIds)
     usersList.append({
-        username: username,
+        username: user.username.toStr(),
         color: null,
         roles: ["user"] ++ user.channels.assert(array)
     })
@@ -197,7 +200,7 @@ def handleUsersOnline(*Connection conn, object msg) (
 )
 
 def handleMessagesGet(*Connection conn, object msg) (
-    string username = getUsername(conn)
+    string id = getUserId(conn)
     if !requireAuth(conn) (
         conn.Send({
             cmd: "error",
@@ -237,7 +240,7 @@ def handleMessagesGet(*Connection conn, object msg) (
         return
     )
 
-    object user = getUser(username)
+    object user = getUser(id)
     if typeof(user.channels) != "array" (
         conn.Send({
             cmd: "error",
@@ -272,7 +275,7 @@ def handleMessagesGet(*Connection conn, object msg) (
 )
 
 def handleDMAddCommand(*Connection conn, string targetUsername) (
-    string username = getUsername(conn)
+    string id = getUserId(conn)
     if !requireAuth(conn) (
         return
     )
@@ -280,15 +283,8 @@ def handleDMAddCommand(*Connection conn, string targetUsername) (
         return
     )
     
-    if targetUsername == username (
-        conn.Send({
-            cmd: "error",
-            val: "Cannot create DM with yourself"
-        })
-        return
-    )
-
-    if !userExists(targetUsername) (
+    string targetId = getIdByUsername(targetUsername)
+    if targetId == "" or targetId == id (
         conn.Send({
             cmd: "error",
             val: "User '" ++ targetUsername ++ "' does not exist in the database"
@@ -296,18 +292,13 @@ def handleDMAddCommand(*Connection conn, string targetUsername) (
         return
     )
 
-    string channelId = createDMChannel(username, targetUsername)
+    string channelId = createDMChannel(id, targetId)
     
-    conn.Send({
-        cmd: "info",
-        val: "Added DM channel with " ++ targetUsername
-    })
-
     sendUpdatedChannelsToChannelMembers(channelId)
 )
 
 def handleGroupCreateCommand(*Connection conn, array parts) (
-    string username = getUsername(conn)
+    string id = getUserId(conn)
     if !requireAuth(conn) (
         return
     )
@@ -330,9 +321,7 @@ def handleGroupCreateCommand(*Connection conn, array parts) (
         int len = parts.len
         while i <= len (
             string member = parts[i].toStr()
-            if member != username (
-                members.append(member)
-            )
+            members.append(member)
             i = i + 1
         )
     )
@@ -342,7 +331,7 @@ def handleGroupCreateCommand(*Connection conn, array parts) (
     int j = 1
     while j <= memLen (
         string member = members[j].toStr()
-        if !userExists(member) (
+        if !userExistsByUsername(member) (
             nonexistentUsers.append(member)
         )
         j = j + 1
@@ -366,23 +355,13 @@ def handleGroupCreateCommand(*Connection conn, array parts) (
         return
     )
 
-    string channelId = createGroupChannel(username, name, members)
+    string channelId = createGroupChannel(id, name, members)
     
-    string successMsg = "Created group '" ++ name ++ "'"
-    if members.len > 0 (
-        successMsg = successMsg ++ " with " ++ members.len.toStr() ++ " member(s)"
-    )
-    
-    conn.Send({
-        cmd: "info",
-        val: successMsg
-    })
-
     sendUpdatedChannelsToChannelMembers(channelId)
 )
 
 def handleGroupAddCommand(*Connection conn, array parts) (
-    string username = getUsername(conn)
+    string id = getUserId(conn)
     if !requireAuth(conn) (
         return
     )
@@ -401,7 +380,8 @@ def handleGroupAddCommand(*Connection conn, array parts) (
     string channelName = parts[3].toStr()
     string targetUsername = parts[4].toStr()
 
-    if !userExists(targetUsername) (
+    string targetId = getIdByUsername(targetUsername)
+    if targetId == "" (
         conn.Send({
             cmd: "error",
             val: "User '" ++ targetUsername ++ "' does not exist in the database"
@@ -409,7 +389,7 @@ def handleGroupAddCommand(*Connection conn, array parts) (
         return
     )
 
-    object user = getUser(username)
+    object user = getUser(id)
     
     if typeof(user.channels) != "array" (
         conn.Send({
@@ -437,12 +417,9 @@ def handleGroupAddCommand(*Connection conn, array parts) (
         return
     )
 
-    bool success = addUserToGroupChannel(channelId, targetUsername)
+    bool success = addUserToGroupChannel(channelId, targetId)
     if success (
-        conn.Send({
-            cmd: "info",
-            val: "Added " ++ targetUsername ++ " to group"
-        })
+        sendUpdatedChannelsToChannelMembers(channelId)
     ) else (
         conn.Send({
             cmd: "error",
@@ -503,7 +480,7 @@ def handleMessageNew(*Connection conn, object msg) (
         return
     )
 
-    string username = getUsername(conn)
+    string id = getUserId(conn)
     if !requireAuth(conn) (
         return
     )
@@ -546,11 +523,11 @@ def handleMessageNew(*Connection conn, object msg) (
         return
     )
 
-    if !verifyChannelMember(conn, username, channel) (
+    if !verifyChannelMember(conn, id, channel) (
         return
     )
 
-    object message = sendChannelMessage(channel, content, username)
+    object message = sendChannelMessage(channel, content, id)
     if message == null (
         conn.Send({
             cmd: "error",
@@ -570,7 +547,7 @@ def handleMessageNew(*Connection conn, object msg) (
 )
 
 def handleDMCreate(*Connection conn, object msg) (
-    string username = getUsername(conn)
+    string id = getUserId(conn)
     if !requireAuth(conn) (
         return
     )
@@ -580,15 +557,8 @@ def handleDMCreate(*Connection conn, object msg) (
 
     string targetUsername = msg.targetUsername.toStr()
 
-    if targetUsername == username (
-        conn.Send({
-            cmd: "error",
-            val: "Cannot create DM with yourself"
-        })
-        return
-    )
-
-    if !userExists(targetUsername) (
+    string targetId = getIdByUsername(targetUsername)
+    if targetId == "" or targetId == id (
         conn.Send({
             cmd: "error",
             val: "User '" ++ targetUsername ++ "' does not exist in the database"
@@ -596,7 +566,7 @@ def handleDMCreate(*Connection conn, object msg) (
         return
     )
 
-    string channelId = createDMChannel(username, targetUsername)
+    string channelId = createDMChannel(id, targetId)
 
     sendUpdatedChannelsToChannelMembers(channelId)
 )
@@ -608,11 +578,11 @@ def sendMessageToAllUsersInChannel(*Connection conn, string channel, object mess
         auto connections = server.GetConnections()
         for i connections.len (
             auto memberConn = connections[i].assert(*Connection)
-            auto connUsername = memberConn.Get("username")
-            if connUsername == null or connUsername.toStr() == "" (
+            auto connId = memberConn.Get("id")
+            if connId == null or connId.toStr() == "" (
                 continue
             )
-            if !members.contains(connUsername.toStr().toLower()) (
+            if !members.contains(connId.toStr()) (
                 continue
             )
             memberConn.Send(message)
@@ -629,13 +599,13 @@ def sendUpdatedChannelsToChannelMembers(string channel) (
             auto memberConn = connections[i]
             if typeof(memberConn) == "*Connection" (
                 auto conn = memberConn.assert(*Connection)
-                auto connUsername = conn.Get("username")
-                if connUsername == null or connUsername.toStr() == "" (
+                auto connId = conn.Get("id")
+                if connId == null or connId.toStr() == "" (
                     continue
                 )
-                string username = connUsername.toStr().toLower()
-                if members.contains(username) and userExists(username) (
-                    object user = getUser(username)
+                string id = connId.toStr()
+                if members.contains(id) (
+                    object user = getUser(id)
                     array formattedChannels = formatSortedChannelsForAPI(user)
                     conn.Send({
                         cmd: "channels_get",
@@ -649,6 +619,7 @@ def sendUpdatedChannelsToChannelMembers(string channel) (
 
 def handleTyping(*Connection conn, object msg) (
     string channel = msg.channel.toStr()
+    string id = getUserId(conn)
     string username = getUsername(conn)
     if !requireAuth(conn) (
         return
@@ -656,7 +627,7 @@ def handleTyping(*Connection conn, object msg) (
     if !checkRateLimit(conn) (
         return
     )
-    if !verifyChannelMember(conn, username, channel) (
+    if !verifyChannelMember(conn, id, channel) (
         return
     )
 
@@ -671,14 +642,14 @@ def handleMessageEdit(*Connection conn, object msg) (
     string channel = msg.channel.toStr()
     string messageId = msg.messageId.toStr()
     string newContent = msg.content.toStr()
-    string username = getUsername(conn)
+    string id = getUserId(conn)
     if !requireAuth(conn) (
         return
     )
     if !checkRateLimit(conn) (
         return
     )
-    if !verifyChannelMember(conn, username, channel) (
+    if !verifyChannelMember(conn, id, channel) (
         return
     )
 
@@ -691,7 +662,7 @@ def handleMessageEdit(*Connection conn, object msg) (
         return
     )
 
-    if message.user.toStr() != username.toLower() (
+    if message.user.toStr() != id (
         conn.Send({
             cmd: "error",
             val: "You can only edit your own messages"
@@ -699,7 +670,7 @@ def handleMessageEdit(*Connection conn, object msg) (
         return
     )
 
-    bool success = editChannelMessage(channel, messageId, newContent, username)
+    bool success = editChannelMessage(channel, messageId, newContent, id)
     if !success (
         conn.Send({
             cmd: "error",
@@ -711,6 +682,8 @@ def handleMessageEdit(*Connection conn, object msg) (
     object updatedMessage = getMessage(channel, messageId)
     sendMessageToAllUsersInChannel(conn, channel, {
         cmd: "message_edit",
+        id: updatedMessage.id,
+        content: updatedMessage.content,
         message: formatMessageForAPI(updatedMessage),
         channel: channel,
         global: true
@@ -720,14 +693,14 @@ def handleMessageEdit(*Connection conn, object msg) (
 def handleMessageDelete(*Connection conn, object msg) (
     string channel = msg.channel.toStr()
     string messageId = msg.messageId.toStr()
-    string username = getUsername(conn)
+    string id = getUserId(conn)
     if !requireAuth(conn) (
         return
     )
     if !checkRateLimit(conn) (
         return
     )
-    if !verifyChannelMember(conn, username, channel) (
+    if !verifyChannelMember(conn, id, channel) (
         return
     )
 
@@ -740,7 +713,7 @@ def handleMessageDelete(*Connection conn, object msg) (
         return
     )
 
-    if message.user.toStr() != username.toLower() (
+    if message.user.toStr() != id (
         conn.Send({
             cmd: "error",
             val: "You can only delete your own messages"
@@ -748,7 +721,7 @@ def handleMessageDelete(*Connection conn, object msg) (
         return
     )
 
-    bool success = deleteChannelMessage(channel, messageId, username)
+    bool success = deleteChannelMessage(channel, messageId, id)
     if !success (
         conn.Send({
             cmd: "error",
@@ -775,8 +748,16 @@ def getUsername(*Connection conn) string (
     return val.toStr()
 )
 
+def getUserId(*Connection conn) string (
+    auto val = conn.Get("id")
+    if val == null (
+        return ""
+    )
+    return val.toStr()
+)
+
 def isAuthenticated(*Connection conn) boolean (
-    return conn.Get("username") != ""
+    return conn.Get("id") != ""
 )
 
 def requireAuth(*Connection conn) bool (
@@ -785,6 +766,14 @@ def requireAuth(*Connection conn) bool (
         return false
     )
     return true
+)
+
+def requireAuthWithId(*Connection conn) string (
+    if !isAuthenticated(conn) (
+        conn.Send(authErrorMsg("Authentication required"))
+        return ""
+    )
+    return getUserId(conn)
 )
 
 def checkRateLimit(*Connection conn) bool (
@@ -818,12 +807,16 @@ def checkRateLimitWithParams(*Connection conn, int maxRequests, int window) bool
     return true
 )
 
-def verifyChannelMember(*Connection conn, string username, string channelId) bool (
+def verifyChannelMember(*Connection conn, string id, string channelId) bool (
     if channelId == "cmds" (
         return true
     )
-    object user = getUser(username)
+    object user = getUser(id)
     if typeof(user.channels) != "array" (
+        conn.Send({
+            cmd: "error",
+            val: "You are not a member of this channel"
+        })
         return false
     )
     array channels = user.channels.assert(array)
@@ -837,7 +830,7 @@ def verifyChannelMember(*Connection conn, string username, string channelId) boo
     return true
 )
 
-def broadcastUserConnect(string username, array channels) (
+def broadcastUserConnect(string id, string username, array channels) (
     object connectMsg = {
         cmd: "user_connect",
         user: {
@@ -849,15 +842,14 @@ def broadcastUserConnect(string username, array channels) (
     auto connections = server.GetConnections()
     for i connections.len (
         auto memberConn = connections[i].assert(*Connection)
-        auto connUsername = memberConn.Get("username")
-        if connUsername == null or connUsername.toStr() == "" (
+        auto connId = memberConn.Get("id")
+        if connId == null or connId.toStr() == "" (
             continue
         )
-        string memberName = connUsername.toStr()
-        if memberName.toLower() == username.toLower() (
+        if connId.toStr() == id (
             continue
         )
-        object memberUser = getUser(memberName)
+        object memberUser = getUser(connId.toStr())
         if typeof(memberUser.channels) == "array" (
             array memberChannels = memberUser.channels
             bool sharesChannel = false
@@ -874,7 +866,11 @@ def broadcastUserConnect(string username, array channels) (
     )
 )
 
-def broadcastUserDisconnect(string username) (
+def broadcastUserDisconnect(string id) (
+    if id == "" (
+        return
+    )
+    string username = getUsernameById(id)
     if username == "" (
         return
     )
@@ -882,7 +878,7 @@ def broadcastUserDisconnect(string username) (
         cmd: "user_disconnect",
         username: username
     }
-    object user = getUser(username)
+    object user = getUser(id)
     array channels = []
     if typeof(user.channels) == "array" (
         channels = user.channels
@@ -890,15 +886,14 @@ def broadcastUserDisconnect(string username) (
     auto connections = server.GetConnections()
     for i connections.len (
         auto memberConn = connections[i].assert(*Connection)
-        auto connUsername = memberConn.Get("username")
-        if connUsername == null or connUsername.toStr() == "" (
+        auto connId = memberConn.Get("id")
+        if connId == null or connId.toStr() == "" (
             continue
         )
-        string memberName = connUsername.toStr()
-        if memberName == username (
+        if connId.toStr() == id (
             continue
         )
-        object memberUser = getUser(memberName)
+        object memberUser = getUser(connId.toStr())
         if typeof(memberUser.channels) == "array" (
             array memberChannels = memberUser.channels.assert(array)
             bool sharesChannel = false
