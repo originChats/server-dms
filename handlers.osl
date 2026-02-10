@@ -744,7 +744,7 @@ def getUsername(*Connection conn) string (
 )
 
 def isAuthenticated(*Connection conn) boolean (
-    return conn.get("username") != ""
+    return conn.Get("username") != ""
 )
 
 def requireAuth(*Connection conn, string username) bool (
