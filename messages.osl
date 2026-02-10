@@ -53,7 +53,7 @@ def formatChannelForAPI(object channel, object userChannels) object (
             break
     )
 
-    return {
+    object result = {
         type: "text",
         name: channelId,
         display_name: name,
@@ -65,6 +65,10 @@ def formatChannelForAPI(object channel, object userChannels) object (
             edit_own: ["user"]
         }
     }
+    if channelType == "dm" (
+        result.icon = "https://avatars.rotur.dev/" ++ name
+    )
+    return result
 )
 
 def getCmdsChannel() object (
