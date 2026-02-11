@@ -12,6 +12,7 @@ import "./db.osl"
 "*Server" server = nil
 
 object users = {}
+object userConnections = {}
 
 def newConnection(*Connection conn) (
     log "New connection"
@@ -75,6 +76,7 @@ def closeConnection(*Connection conn) (
     log "Connection closed for " ++ username
     users.delete(conn)
     if id != "" (
+        userConnections.delete(id)
         broadcastUserDisconnect(id)
     )
 )

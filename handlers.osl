@@ -27,6 +27,8 @@ def handleAuth(*Connection conn, object msg) (
     lock.Lock("users")
     users[conn] = id
     lock.Unlock("users")
+
+    userConnections[id] = conn
     conn.Set("id", id)
     conn.Set("username", username)
     conn.Set("ratelimit_timestamp", timestamp.toNum())
@@ -594,22 +596,30 @@ def sendMessageToAllUsersInChannel(*Connection conn, string channel, object mess
     )
 )
 
+def getChannelMemberIds(string channelId) array (
+    object ch = getChannel(channelId)
+    if ch == null or typeof(ch.members) != "array" (
+        return []
+    )
+    return ch.members.assert(array)
+)
+
 def sendUpdatedChannelsToChannelMembers(string channel) (
-    object ch = getChannel(channel)
-    if ch != null and typeof(ch.members) == "array" (
-        array members = ch.members.assert(array)
-        auto connections = server.GetConnections()
-        for i connections.len (
-            auto memberConn = connections[i]
-            if typeof(memberConn) == "*Connection" (
-                auto conn = memberConn.assert(*Connection)
-                auto connId = conn.Get("id")
-                if connId == null or connId.toStr() == "" (
-                    continue
-                )
+    array memberIds = getChannelMemberIds(channel)
+    if memberIds.len == 0 (
+        return
+    )
+
+    for i memberIds.len (
+        string memberId = memberIds[i].toStr()
+        auto memberConn = userConnections[memberId]
+        if memberConn != null and typeof(memberConn) == "*Connection" (
+            auto conn = memberConn.assert(*Connection)
+            auto connId = conn.Get("id")
+            if connId != null and connId.toStr() != "" (
                 string id = connId.toStr()
-                if members.contains(id) (
-                    object user = getUser(id)
+                object user = getUser(id)
+                if user != null (
                     array formattedChannels = formatSortedChannelsForAPI(user)
                     conn.Send({
                         cmd: "channels_get",
