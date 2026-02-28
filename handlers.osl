@@ -262,18 +262,21 @@ def handleMessagesGet(*Connection conn, object msg) (
 
     array messages = getChannelMessages(channel)
     
-    int start = 0
-    if typeof(msg.start) == "number" (
-        start = msg.start.toInt()
-    ) else if typeof(msg.start) == "string" (
-        start = msg.start.toStr().toInt()
+    auto start = msg.start
+    int limit = round(msg.limit.toNum())
+    
+    if typeof(start) == "string" (
+        start = start.toStr()
+    ) else (
+        start = ""
     )
     
-    int limit = 100
-    if typeof(msg.limit) == "number" (
-        limit = msg.limit.toInt()
-    ) else if typeof(msg.limit) == "string" (
-        limit = msg.limit.toStr().toInt()
+    if typeof(limit) == "number" (
+        limit = limit.toInt()
+    ) else if typeof(limit) == "string" (
+        limit = limit.toStr().toInt()
+    ) else (
+        limit = 100
     )
     
     if limit <= 0 (
@@ -286,19 +289,62 @@ def handleMessagesGet(*Connection conn, object msg) (
     array formattedMessages = []
     int totalMessages = messages.len
     
-    if start < 0 (
-        start = 0
+    int endIndex = 0
+    int startIndex = 0
+    
+    if typeof(msg.start) == "number" (
+        int startValue = msg.start.toInt()
+        if startValue < 0 (
+            startValue = 0
+        )
+        endIndex = totalMessages - startValue
+        startIndex = endIndex - limit
+        if startIndex < 0 (
+            startIndex = 0
+        )
+    ) else if typeof(msg.start) == "string" (
+        string startId = msg.start.toStr()
+        int foundIndex = -1
+        int i = 1
+        while i <= totalMessages (
+            object m = messages[i].assert(object)
+            if m.id.toStr() == startId (
+                foundIndex = i
+                break
+            )
+            i = i + 1
+        )
+        if foundIndex == -1 (
+            formattedMessages = []
+        ) else (
+            endIndex = foundIndex
+            startIndex = endIndex - limit
+            if startIndex < 0 (
+                startIndex = 0
+            )
+        )
+    ) else (
+        endIndex = totalMessages
+        startIndex = endIndex - limit
+        if startIndex < 0 (
+            startIndex = 0
+        )
     )
     
-    int end = start + limit
-    if end > totalMessages (
-        end = totalMessages
+    if endIndex > totalMessages (
+        endIndex = totalMessages
     )
     
-    int i = start + 1
-    while i <= end (
-        formattedMessages.append(formatMessageForAPI(messages[i].assert(object)))
-        i = i + 1
+    if startIndex >= endIndex (
+        if formattedMessages.len == 0 (
+            formattedMessages = []
+        )
+    ) else (
+        int i = startIndex + 1
+        while i <= endIndex (
+            formattedMessages.append(formatMessageForAPI(messages[i].assert(object)))
+            i = i + 1
+        )
     )
 
     conn.Send({
@@ -558,6 +604,13 @@ def handleDMCreate(*Connection conn, object msg) (
 
     string channelId = createDMChannel(id, targetId)
 
+    object user = getUser(id)
+    array formattedChannels = formatSortedChannelsForAPI(user)
+    conn.Send({
+        cmd: "channels_get",
+        val: formattedChannels
+    })
+
     sendUpdatedChannelsToChannelMembers(channelId)
 )
 
@@ -599,17 +652,13 @@ def sendUpdatedChannelsToChannelMembers(string channel) (
         auto memberConn = userConnections[memberId]
         if memberConn != null and typeof(memberConn) == "*Connection" (
             auto conn = memberConn.assert(*Connection)
-            auto connId = conn.Get("id")
-            if connId != null and connId.toStr() != "" (
-                string id = connId.toStr()
-                object user = getUser(id)
-                if user != null (
-                    array formattedChannels = formatSortedChannelsForAPI(user)
-                    conn.Send({
-                        cmd: "channels_get",
-                        val: formattedChannels
-                    })
-                )
+            object user = getUser(memberId)
+            if user != null (
+                array formattedChannels = formatSortedChannelsForAPI(user)
+                conn.Send({
+                    cmd: "channels_get",
+                    val: formattedChannels
+                })
             )
         )
     )
