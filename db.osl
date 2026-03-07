@@ -274,7 +274,7 @@ def sendChannelMessage(string channelId, string content, string id, string reply
         if repliedMessage != null (
             message.reply_to = {
                 id: replyToId,
-                user: repliedMessage.user.toStr()
+                user: getUsernameById(repliedMessage.user.toStr())
             }
         )
     )
