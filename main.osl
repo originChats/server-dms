@@ -97,6 +97,8 @@ def handleMessage(*Connection conn, string message) (
     response = handleVoiceUnmute(conn, msg)
   case "voice_state"
     response = handleVoiceState(conn, msg)
+  default
+    response = { cmd: "error", val: "Unknown command: " ++ cmd }
   )
 
   if response == null (
@@ -112,7 +114,6 @@ def handleMessage(*Connection conn, string message) (
     if channel != "" (
       sendMessageToAllUsersInChannel(conn, channel, response)
     )
-    conn.Send(response)
     return
   )
   
