@@ -54,7 +54,7 @@ def formatChannelForAPI(object channel, object userChannels, number last_message
     )
 
     // Collect current voice participants for this channel
-    array voiceParticipants = []
+    array voiceState = []
     if typeof(voiceChannels[channelId]) == "object" (
         object vcData = voiceChannels[channelId].assert(object)
         any connections = server.GetConnections()
@@ -71,8 +71,7 @@ def formatChannelForAPI(object channel, object userChannels, number last_message
             )
             if typeof(vcData[memberId]) == "object" (
                 object entry = vcData[memberId].assert(object)
-                voiceParticipants.append({
-                    id: memberId,
+                voiceState.append({
                     username: entry.username.toStr(),
                     muted: entry.muted.toBool()
                 })
@@ -86,7 +85,7 @@ def formatChannelForAPI(object channel, object userChannels, number last_message
         display_name: name,
         description: description,
         last_message: last_message,
-        voice_participants: voiceParticipants,
+        voice_state: voiceState,
         permissions: {
             view: [channelId],
             send: ["user"],
