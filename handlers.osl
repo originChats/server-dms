@@ -4,7 +4,6 @@ def handleAuth(*Connection conn, object msg) object (
     return authErrorMsg("missing token")
   )
   string validatorKey = conn.Get("validator_key").toStr()
-  log validatorKey
   object resp = requests.Get("https://api.rotur.dev/validate?key=" ++ validatorKey ++ "&v=" ++ token)
 
   if !resp.success (
