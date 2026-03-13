@@ -899,6 +899,32 @@ def handleMessagePin(*Connection conn, object msg) object (
   }
 )
 
+def handleMessageReplies(*Connection conn, object msg) object (
+  string channel = msg.channel.toStr()
+  string id = getUserId(conn)
+  string messageId = msg.id.toStr()
+  if messageId == "" (
+    return { cmd: "error", val: "Missing id parameter" }
+  )
+  if !isAuthenticated(conn) (
+    return authErrorMsg("Authentication required")
+  )
+  if !checkRateLimit(conn) (
+    return { cmd: "error", val: "Rate limit exceeded. Please slow down." }
+  )
+  if !verifyChannelMemberNoSend(id, channel) (
+    return { cmd: "error", val: "You are not a member of this channel" }
+  )
+
+  array replies = getMessageReplies(channel, messageId)
+  return {
+    cmd: "message_replies",
+    channel: channel,
+    message_id: messageId,
+    replies: replies
+  }
+)
+
 def handleMessageUnpin(*Connection conn, object msg) object (
   string channel = msg.channel.toStr()
   string id = getUserId(conn)

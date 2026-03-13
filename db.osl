@@ -330,6 +330,37 @@ def editChannelMessage(string channelId, string messageId, string newContent, st
     return false
 )
 
+def getMessageReplies(string channelId, string messageId) array (
+    object ch = getChannel(channelId)
+    if ch == null (
+        return []
+    )
+
+    if typeof(ch.messages) != "array" (
+        return []
+    )
+
+    array messages = ch.messages.assert(array)
+    array replies = []
+    for i messages.len (
+        any msg = messages[i]
+        if typeof(msg) == "object" (
+            object message = msg.assert(object)
+            if message.reply_to.toStr() == messageId (
+                replies.append(message)
+            )
+        )
+    )
+    // Return in reverse order (most recent first)
+    array reversed = []
+    int j = replies.len
+    while j >= 1 (
+        reversed.append(replies[j])
+        j = j - 1
+    )
+    return reversed
+)
+
 def deleteChannelMessage(string channelId, string messageId, string id) bool (
     object ch = getChannel(channelId)
     if ch == null (

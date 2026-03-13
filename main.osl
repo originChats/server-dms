@@ -56,7 +56,8 @@ def newConnection(*Connection conn) (
                 "voice_leave",
                 "voice_mute",
                 "voice_state",
-                "voice_unmute"
+                "voice_unmute",
+                "message_replies"
             ]
         }
     })
@@ -91,6 +92,8 @@ def handleMessage(*Connection conn, string message) (
     response = handleMessagesGet(conn, msg)
   case "message_new"
     response = handleMessageNew(conn, msg)
+  case "message_replies"
+    response = handleMessageReplies(conn, msg)
   case "message_edit"
     response = handleMessageEdit(conn, msg)
   case "message_delete"
