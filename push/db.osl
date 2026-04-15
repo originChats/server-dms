@@ -1,0 +1,185 @@
+def computeDeviceFingerprint(string ip, string userAgent, string country) string (
+	string payload = ip ++ "|" ++ userAgent ++ "|" ++ country
+	string signature = crypto.hmacSha256("dms-push-secret-2024", payload)
+	return signature.trim(1, -16)
+)
+
+def _load() object (
+	string path = "db/push_subscriptions.json"
+	if !fs.Exists(path) (
+		return {}
+	)
+	any content = fs.ReadFile(path).JsonParse()
+	if typeof(content) != "object" (
+		return {}
+	)
+	return content.assert(object)
+)
+
+def _save(object data) (
+	string path = "db/push_subscriptions.json"
+	fs.WriteFile(path, data.JsonStringify())
+)
+
+def upsertSubscription(string username, string endpoint, string p256dh, string auth, string deviceFingerprint) (
+	lock.Lock("push_db")
+	object data = _load()
+	string lowerUsername = username.toLower()
+
+	if typeof(data[lowerUsername]) != "array" (
+		data[lowerUsername] = []
+	)
+
+	array subs = data[lowerUsername].assert(array)
+	bool found = false
+	array newSubs = []
+
+	for i subs.len (
+		object sub = subs[i].assert(object)
+		if deviceFingerprint != "" and sub.device_fingerprint.toStr() == deviceFingerprint (
+			newSubs.append({
+				endpoint: endpoint,
+				p256dh: p256dh,
+				auth: auth,
+				device_fingerprint: deviceFingerprint
+			})
+			found = true
+		) else if sub.endpoint.toStr() == endpoint (
+			newSubs.append({
+				endpoint: endpoint,
+				p256dh: p256dh,
+				auth: auth,
+				device_fingerprint: deviceFingerprint
+			})
+			found = true
+		) else (
+			newSubs.append(sub)
+		)
+	)
+
+	if !found (
+		newSubs.append({
+			endpoint: endpoint,
+			p256dh: p256dh,
+			auth: auth,
+			device_fingerprint: deviceFingerprint
+		})
+	)
+
+	data[lowerUsername] = newSubs
+	_save(data)
+	lock.Unlock("push_db")
+)
+
+def deleteSubscription(string endpoint, string username) (
+	lock.Lock("push_db")
+	object data = _load()
+
+	if username != "" (
+		string lowerUsername = username.toLower()
+		if typeof(data[lowerUsername]) == "array" (
+			array subs = data[lowerUsername].assert(array)
+			array newSubs = []
+			for i subs.len (
+				object sub = subs[i].assert(object)
+				if sub.endpoint.toStr() != endpoint (
+					newSubs.append(sub)
+				)
+			)
+			data[lowerUsername] = newSubs
+		)
+	) else (
+		array keyList = []
+		for key data (
+			keyList.append(key)
+		)
+		for i keyList.len (
+			string k = keyList[i].toStr()
+			if typeof(data[k]) == "array" (
+				array subs = data[k].assert(array)
+				array newSubs = []
+				for j subs.len (
+					object sub = subs[j].assert(object)
+					if sub.endpoint.toStr() != endpoint (
+						newSubs.append(sub)
+					)
+				)
+				data[k] = newSubs
+			)
+		)
+	)
+
+	_save(data)
+	lock.Unlock("push_db")
+)
+
+def deleteSubscriptionByFingerprint(string username, string fingerprint) (
+	lock.Lock("push_db")
+	object data = _load()
+	string lowerUsername = username.toLower()
+
+	if typeof(data[lowerUsername]) == "array" (
+		array subs = data[lowerUsername].assert(array)
+		array newSubs = []
+		for i subs.len (
+			object sub = subs[i].assert(object)
+			if sub.device_fingerprint.toStr() != fingerprint (
+				newSubs.append(sub)
+			)
+		)
+		data[lowerUsername] = newSubs
+		_save(data)
+	)
+
+	lock.Unlock("push_db")
+)
+
+def getSubscriptionsForUser(string username) array (
+	lock.Lock("push_db")
+	object data = _load()
+	string lowerUsername = username.toLower()
+
+	if typeof(data[lowerUsername]) != "array" (
+		lock.Unlock("push_db")
+		return []
+	)
+
+	array result = []
+	array subs = data[lowerUsername].assert(array)
+	for i subs.len (
+		result.append(subs[i])
+	)
+
+	lock.Unlock("push_db")
+	return result
+)
+
+def isUserOnline(string username) bool (
+	string lowerUsername = username.toLower()
+	any connections = server.GetConnections()
+
+	for i connections.len (
+		"*Connection" conn = connections[i].assert(*Connection)
+		any connUsername = conn.Get("username")
+		if connUsername != null and connUsername.toStr().toLower() == lowerUsername (
+			return true
+		)
+	)
+
+	return false
+)
+
+def isUserIdOnline(string userId) bool (
+	string lowerId = userId.toLower()
+	any connections = server.GetConnections()
+
+	for i connections.len (
+		"*Connection" conn = connections[i].assert(*Connection)
+		any connId = conn.Get("id")
+		if connId != null and connId.toStr().toLower() == lowerId (
+			return true
+		)
+	)
+
+	return false
+)

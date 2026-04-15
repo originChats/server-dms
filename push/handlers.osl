@@ -1,0 +1,176 @@
+def _getVapidConfig() object (
+	string configPath = "db/vapid_config.json"
+	string privateKeyPath = "db/private_key.pem"
+
+	if fs.Exists(configPath) and fs.Exists(privateKeyPath) (
+		any content = fs.ReadFile(configPath).JsonParse()
+		if typeof(content) == "object" (
+			return content.assert(object)
+		)
+	) else (
+		object keys = webpush.GenerateVAPIDKeys()
+		fs.WriteFile(privateKeyPath, keys.private_key.toStr())
+		object config = {
+			public_key: keys.public_key,
+			claims_email: "mailto:mistium@icloud.com"
+		}
+		fs.WriteFile(configPath, config.JsonStringify())
+		return config
+	)
+
+	return null
+)
+
+def getVapidPublicKey() string (
+	object config = _getVapidConfig()
+	if config == null (
+		return ""
+	)
+	return config.public_key.toStr()
+)
+
+def handlePushGetVapid(*Connection conn) object (
+	string publicKey = getVapidPublicKey()
+	if publicKey == "" (
+		return { cmd: "error", src: "push_get_vapid", val: "VAPID keys not configured on this server" }
+	)
+	return { cmd: "push_vapid", key: publicKey }
+)
+
+def handlePushSubscribe(*Connection conn, object msg) object (
+	string username = conn.Get("username").toStr()
+	if username == "" (
+		return { cmd: "error", src: "push_subscribe", val: "Not authenticated" }
+	)
+
+	any subAny = msg.subscription
+	if typeof(subAny) != "object" (
+		return { cmd: "error", src: "push_subscribe", val: "Missing subscription object" }
+	)
+	object sub = subAny.assert(object)
+
+	string endpoint = sub.endpoint.toStr()
+	any keysAny = sub.keys
+	if typeof(keysAny) != "object" (
+		return { cmd: "error", src: "push_subscribe", val: "Missing subscription keys" }
+	)
+	object keys = keysAny.assert(object)
+	string p256dh = keys.p256dh.toStr()
+	string auth = keys.auth.toStr()
+
+	if endpoint == "" or p256dh == "" or auth == "" (
+		return { cmd: "error", src: "push_subscribe", val: "subscription must include endpoint, keys.p256dh and keys.auth" }
+	)
+
+	string ip = conn.GetHeader("Cf-Connecting-Ip").toStr()
+	if ip == "" (
+		string forwardedFor = conn.GetHeader("X-Forwarded-For").toStr()
+		if forwardedFor != "" (
+			array parts = forwardedFor.split(",")
+			ip = parts[1].toStr().trim()
+		)
+	)
+	if ip == "" (
+		ip = conn.GetHeader("Remote-Addr").toStr()
+	)
+
+	string userAgent = conn.GetHeader("User-Agent").toStr()
+	string country = conn.GetHeader("Cf-Ipcountry").toStr()
+
+	string deviceFingerprint = computeDeviceFingerprint(ip, userAgent, country)
+
+	upsertSubscription(username, endpoint, p256dh, auth, deviceFingerprint)
+	log "Push subscription registered for " ++ username ++ " (device: " ++ deviceFingerprint.trim(1, 8) ++ "..."
+
+	return { cmd: "push_subscribed", success: true, device_fingerprint: deviceFingerprint }
+)
+
+def handlePushUnsubscribe(*Connection conn, object msg) object (
+	string username = conn.Get("username").toStr()
+	if username == "" (
+		return { cmd: "error", src: "push_unsubscribe", val: "Not authenticated" }
+	)
+
+	string endpoint = msg.endpoint.toStr()
+	if endpoint == "" (
+		return { cmd: "error", src: "push_unsubscribe", val: "Missing endpoint" }
+	)
+
+	deleteSubscription(endpoint, username)
+	log "Push subscription removed for " ++ username
+
+	return { cmd: "push_unsubscribed", success: true }
+)
+
+def sendPushNotification(string username, string title, string body, object extraData) (
+	object config = _getVapidConfig()
+	if config == null (
+		return
+	)
+
+	string claimsEmail = config.claims_email.toStr()
+	string privateKeyPath = "db/private_key.pem"
+
+	if !fs.Exists(privateKeyPath) (
+		log "VAPID private key not found"
+		return
+	)
+
+	string privateKey = fs.ReadFile(privateKeyPath)
+
+	array subs = getSubscriptionsForUser(username)
+	if subs.len == 0 (
+		return
+	)
+
+	string bodyTrimmed = body
+	if body.len > 120 (
+		bodyTrimmed = body.trim(1, 120)
+	)
+
+	object payload = {
+		title: title,
+		body: bodyTrimmed
+	}
+
+	if typeof(extraData) == "object" (
+		array keyList = []
+		for key extraData (
+			keyList.append(key)
+		)
+		for i keyList.len (
+			string k = keyList[i].toStr()
+			payload[k] = extraData[k]
+		)
+	)
+
+	string payloadStr = payload.JsonStringify()
+
+	for i subs.len (
+		object sub = subs[i].assert(object)
+		string endpoint = sub.endpoint.toStr()
+		string p256dh = sub.p256dh.toStr()
+		string auth = sub.auth.toStr()
+
+		object result = webpush.SendWebPush(endpoint, p256dh, auth, payloadStr, privateKey, claimsEmail, 86400)
+
+		if result.success.toBool() (
+			log "Push sent to " ++ username
+		) else (
+			int status = result.status.toInt()
+			if status == 404 or status == 410 (
+				log "Push subscription expired for " ++ username
+				deleteSubscription(endpoint, username)
+			) else (
+				log "Push failed for " ++ username ++ ": " ++ result.error.toStr()
+			)
+		)
+	)
+)
+
+def sendPushNotificationToOfflineUser(string username, string title, string body, object extraData) (
+	if isUserOnline(username) (
+		return
+	)
+	sendPushNotification(username, title, body, extraData)
+)

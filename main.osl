@@ -2,10 +2,16 @@ import "osl/ws"
 import "osl/requests"
 import "osl/fs"
 import "osl/lock"
+import "osl/crypto"
+import "osl/webpush"
+import "osl/arrays"
+import "osl/cmd"
 
 import "./messages.osl"
-import "./handlers.osl"
 import "./db.osl"
+import "./push/db.osl"
+import "./push/handlers.osl"
+import "./handlers.osl"
 
 "*Server" server = nil
 
@@ -49,6 +55,7 @@ def newConnection(*Connection conn) (
                 "message_unpin",
                 "messages_get",
                 "messages_pinned",
+                "messages_around",
                 "typing",
                 "users_list",
                 "users_online",
@@ -57,7 +64,10 @@ def newConnection(*Connection conn) (
                 "voice_mute",
                 "voice_state",
                 "voice_unmute",
-                "message_replies"
+                "message_replies",
+                "push_get_vapid",
+                "push_subscribe",
+                "push_unsubscribe"
             ]
         }
     })
@@ -90,6 +100,8 @@ def handleMessage(*Connection conn, string message) (
     response = handleUsersOnline(conn, msg)
   case "messages_get"
     response = handleMessagesGet(conn, msg)
+  case "messages_around"
+    response = handleMessagesAround(conn, msg)
   case "message_new"
     response = handleMessageNew(conn, msg)
   case "message_replies"
@@ -122,6 +134,12 @@ def handleMessage(*Connection conn, string message) (
     response = handleVoiceUnmute(conn, msg)
   case "voice_state"
     response = handleVoiceState(conn, msg)
+  case "push_get_vapid"
+    response = handlePushGetVapid(conn)
+  case "push_subscribe"
+    response = handlePushSubscribe(conn, msg)
+  case "push_unsubscribe"
+    response = handlePushUnsubscribe(conn, msg)
   default
     response = { cmd: "error", val: "Unknown command: " ++ cmd }
   )
@@ -214,10 +232,14 @@ def cleanupVoiceOnDisconnect(*Connection conn, string id, string username, strin
     sendMessageToVoiceChannelMembers(vcName, leaveMsg)
 )
 
-def main() (
+mainloop:
+
     fs.Mkdir("db")
     fs.Mkdir("db/users")
     fs.Mkdir("db/channels")
+    fs.Mkdir("db/channel_messages")
+
+    migrateChannelMessagesForAllChannels()
 
     server = ws.NewServer(":5618", "/")
 
@@ -227,4 +249,3 @@ def main() (
 
     go startPingTimer()
     server.Start()
-)

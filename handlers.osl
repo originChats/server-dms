@@ -1,3 +1,37 @@
+def parseMentions(string content) array (
+	array mentions = []
+	bool inMention = false
+	string currentMention = ""
+
+	for i content.len (
+		string c = content.slice(i, i + 1)
+
+		if c == "@" (
+			if currentMention.len > 0 (
+				mentions.append(currentMention)
+			)
+			currentMention = ""
+			inMention = true
+		) else if inMention (
+			if c == " " or c == "\n" or c == "\t" or c == "," or c == "." or c == "!" or c == "?" or c == ":" or c == ";" (
+				if currentMention.len > 0 (
+					mentions.append(currentMention)
+				)
+				currentMention = ""
+				inMention = false
+			) else (
+				currentMention = currentMention ++ c
+			)
+		)
+	)
+
+	if currentMention.len > 0 (
+		mentions.append(currentMention)
+	)
+
+	return mentions
+)
+
 def handleAuth(*Connection conn, object msg) object (
   string token = msg.validator.toStr()
   if token == "" (
@@ -33,14 +67,22 @@ def handleAuth(*Connection conn, object msg) object (
   conn.Set("ratelimit_timestamp", timestamp.toNum())
   conn.Set("ratelimit_count", 0)
 
-  string path = "db/users/" ++ id ++ ".json"
-  if !fs.Exists(path) (
-    fs.WriteFile(path, {
-      id: id,
-      username: username,
-      channels: []
-    })
-  )
+	string path = "db/users/" ++ id ++ ".json"
+	if !fs.Exists(path) (
+		fs.WriteFile(path, {
+			id: id,
+			username: username,
+			channels: []
+		})
+	) else (
+		object existingUser = getUser(id)
+		if existingUser != null (
+			if existingUser.username.toStr() != username (
+				existingUser.username = username
+				fs.WriteFile(path, existingUser.JsonStringify())
+			)
+		)
+	)
 
   object user = getUser(id)
 
@@ -266,6 +308,9 @@ def handleMessagesGet(*Connection conn, object msg) object (
     int foundIndex = -1
     int i = 1
     while i <= totalMessages (
+      if typeof(messages[i]) != "object" (
+        continue
+      )
       object m = messages[i].assert(object)
       if m.id.toStr() == startId (
         foundIndex = i
@@ -301,7 +346,11 @@ def handleMessagesGet(*Connection conn, object msg) object (
   ) else (
     int i = startIndex + 1
     while i <= endIndex (
-      formattedMessages.append(formatMessageForAPI(messages[i].assert(object)))
+      any message = messages[i]
+      if typeof(message) == "object" (
+        object formatted = formatMessageForAPI(message.assert(object))
+        formattedMessages.append(formatted)
+      )
       i = i + 1
     )
   )
@@ -310,6 +359,56 @@ def handleMessagesGet(*Connection conn, object msg) object (
     channel,
     cmd: "messages_get",
     messages: formattedMessages
+  }
+)
+
+def handleMessagesAround(*Connection conn, object msg) object (
+  string channel = msg.channel.toStr()
+  string id = getUserId(conn)
+  string messageId = msg.around.toStr()
+  if messageId == "" (
+    return { cmd: "error", val: "around (message ID) is required" }
+  )
+  if !isAuthenticated(conn) (
+    return authErrorMsg("Authentication required")
+  )
+  if !checkRateLimit(conn) (
+    return { cmd: "error", val: "Rate limit exceeded. Please slow down." }
+  )
+
+  object ch = getChannel(channel)
+  if ch == null (
+    return { cmd: "error", val: "You are not a member of this channel" }
+  )
+
+  object user = getUser(id)
+  array channels = user.channels.assert(array)
+  if typeof(user.channels) != "array" or !channels.contains(channel) (
+    return { cmd: "error", val: "You are not a member of this channel" }
+  )
+
+  any boundsRaw = msg.bounds
+
+  if typeof(boundsRaw) != "object" (
+    return { cmd: "error", val: "bounds (object) is required" }
+  )
+
+  object bounds = boundsRaw.assert(object)
+  int above = bounds.above.toInt()
+  int below = bounds.below.toInt()
+
+  object response = getChannelMessagesAround(channel, messageId, above, below)
+
+  array messages = arrays.Map(response.messages.assert(array), v -> formatMessageForAPI(v.assert(object)))
+
+  return {
+    cmd: "messages_around",
+    channel: channel,
+    messages: messages,
+    range: {
+      start: response.start,
+      end: response.end
+    }
   }
 )
 
@@ -484,10 +583,51 @@ def handleMessageNew(*Connection conn, object msg) object (
     return { cmd: "error", val: "You are not a member of this channel" }
   )
 
-  object message = sendChannelMessage(channel, content, id, replyToId)
-  if message == null (
-    return { cmd: "error", val: "Failed to send message" }
-  )
+	object message = sendChannelMessage(channel, content, id, replyToId)
+	if message == null (
+		return { cmd: "error", val: "Failed to send message" }
+	)
+
+	string senderUsername = getUsername(conn)
+	object ch = getChannel(channel)
+	if ch != null and typeof(ch.members) == "array" (
+		array members = ch.members.assert(array)
+		for i members.len (
+			string memberId = members[i].toStr()
+			if memberId != id (
+				if !isUserIdOnline(memberId) (
+					string recipientUsername = getUsernameById(memberId)
+					object extraData1 = { channel: channel }
+					sendPushNotificationToOfflineUser(recipientUsername, senderUsername, content, extraData1)
+				)
+			)
+		)
+	)
+
+	array mentions = parseMentions(content)
+	for i mentions.len (
+		string mentionedUsername = mentions[i].toStr()
+		if mentionedUsername != senderUsername (
+			if !isUserOnline(mentionedUsername) (
+				object extraData2 = { channel: channel, mention: true }
+				sendPushNotificationToOfflineUser(mentionedUsername, "DMs — " ++ senderUsername ++ " mentioned you", content, extraData2)
+			)
+		)
+	)
+
+	if replyToId != "" (
+		object replyMsg = getMessage(channel, replyToId)
+		if replyMsg != null (
+			string originalAuthorId = replyMsg.user.toStr()
+			string originalAuthorUsername = getUsernameById(originalAuthorId)
+			if originalAuthorUsername != senderUsername (
+				if !isUserOnline(originalAuthorUsername) (
+					object extraData3 = { channel: channel, reply_to: replyToId }
+					sendPushNotificationToOfflineUser(originalAuthorUsername, "DMs — " ++ senderUsername ++ " replied", content, extraData3)
+				)
+			)
+		)
+	)
 
   return {
     cmd: "message_new",
@@ -1313,45 +1453,45 @@ def broadcastUserConnect(string id, string username, array channels) (
 )
 
 def broadcastUserDisconnect(string id) (
-    if id == "" (
-        return
+  if id == "" (
+    return
+  )
+  string username = getUsernameById(id)
+  if username == "" (
+    return
+  )
+  object disconnectMsg = {
+    cmd: "user_disconnect",
+    username: username
+  }
+  object user = getUser(id)
+  array channels = []
+  if typeof(user.channels) == "array" (
+    channels = user.channels
+  )
+  any connections = server.GetConnections()
+  for i connections.len (
+    "*Connection" memberConn = connections[i].assert(*Connection)
+    any connId = memberConn.Get("id")
+    if connId == null or connId.toStr() == "" (
+      continue
     )
-    string username = getUsernameById(id)
-    if username == "" (
-        return
+    if connId.toStr() == id (
+      continue
     )
-    object disconnectMsg = {
-        cmd: "user_disconnect",
-        username: username
-    }
-    object user = getUser(id)
-    array channels = []
-    if typeof(user.channels) == "array" (
-        channels = user.channels
-    )
-    any connections = server.GetConnections()
-    for i connections.len (
-        "*Connection" memberConn = connections[i].assert(*Connection)
-        any connId = memberConn.Get("id")
-        if connId == null or connId.toStr() == "" (
-            continue
+    object memberUser = getUser(connId.toStr())
+    if typeof(memberUser.channels) == "array" (
+      array memberChannels = memberUser.channels.assert(array)
+      bool sharesChannel = false
+      for j memberChannels.len (
+        if channels.contains(memberChannels[j].toStr()) (
+          sharesChannel = true
+          break
         )
-        if connId.toStr() == id (
-            continue
-        )
-        object memberUser = getUser(connId.toStr())
-        if typeof(memberUser.channels) == "array" (
-            array memberChannels = memberUser.channels.assert(array)
-            bool sharesChannel = false
-            for j memberChannels.len (
-                if channels.contains(memberChannels[j].toStr()) (
-                    sharesChannel = true
-                    break
-                )
-            )
-            if sharesChannel (
-                memberConn.Send(disconnectMsg)
-            )
-        )
+      )
+      if sharesChannel (
+        memberConn.Send(disconnectMsg)
+      )
     )
+  )
 )

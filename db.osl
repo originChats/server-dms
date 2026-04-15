@@ -118,6 +118,50 @@ def saveChannel(string channelId, object channel) (
     fs.WriteFile(path, channel.JsonStringify())
 )
 
+def migrateChannelMessages(string channelId) (
+    any path = "db/channels/" ++ channelId ++ ".json"
+    if !fs.Exists(path) (
+        return
+    )
+
+    object ch = getChannel(channelId)
+    if typeof(ch.messages) != "array" (
+        return
+    )
+
+    array messages = ch.messages.assert(array)
+    saveChannelMessages(channelId, messages)
+    ch.delete("messages")
+    saveChannel(channelId, ch)
+)
+
+def migrateChannelMessagesForAllChannels() (
+    array channels = fs.ReadDir("db/channels")
+    for i channels.len (
+        migrateChannelMessages(channels[i].toStr().trim(1, -6))
+    )
+)
+
+def appendChannelMessage(string channelId, object message) (
+    any path = "db/channel_messages/" ++ channelId ++ ".json"
+    if !fs.Exists(path) (
+        return
+    )
+
+    fs.AppendToFile(path, "\n" ++ message.JsonStringify())
+)
+
+def saveChannelMessages(string channelId, array messages) (
+    any path = "db/channel_messages/" ++ channelId ++ ".json"
+    fs.WriteFile(path, "")
+    for i messages.len (
+        if typeof(messages[i]) != "object" (
+            continue
+        )
+        appendChannelMessage(channelId, messages[i].assert(object))
+    )
+)
+
 def randomString(int length) string (
     string chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     string result = ""
@@ -244,11 +288,7 @@ def sendChannelMessage(string channelId, string content, string id, string reply
         return null
     )
 
-    if typeof(ch.messages) != "array" (
-        ch.messages = []
-    )
-
-    array messages = ch.messages.assert(array)
+    array messages = getChannelMessages(channelId)
 
     string messageId = randomString(10)
     object message = {
@@ -280,35 +320,89 @@ def sendChannelMessage(string channelId, string content, string id, string reply
     )
 
     messages.append(message)
-    ch.messages = messages
-    saveChannel(channelId, ch)
+    saveChannelMessages(channelId, messages)
     return message
 )
 
 def getChannelMessages(string channelId) array (
-    object ch = getChannel(channelId)
-    if ch == null (
+    any path = "db/channel_messages/" ++ channelId ++ ".json"
+    if !fs.Exists(path) (
+        return []
+    )
+    
+    array messages = fs.ReadFile(path).strip().split("\n")
+
+    if messages.len == 0 (
         return []
     )
 
-    if typeof(ch.messages) != "array" (
-        return []
+    return arrays.Map(messages, v -> v.toStr().JsonParse())
+)
+
+def getChannelMessagesAround(string channelId, string around, int above, int below) object (
+    any path = "db/channel_messages/" ++ channelId ++ ".json"
+    if !fs.Exists(path) (
+        return {}
+    )
+    
+    // string[]
+    array messages = fs.ReadFile(path).strip().split("\n")
+
+    if messages.len == 0 (
+        return {}
     )
 
-    return ch.messages.assert(array)
+    int idx = 0
+
+    for i messages.len (
+        string msg = messages[i].toStr()
+        if !msg.contains(around) (
+            continue
+        )
+
+        any msgParsed = msg.JsonParse()
+        if typeof(msgParsed) != "object" (
+            continue
+        )
+
+        object msgData = msgParsed.assert(object)
+        if msgData.id.toStr() != around (
+            continue
+        )
+        
+        idx = i
+        break
+    )
+
+    array result = []
+    int start = idx - min(below, 200)
+    int end = idx + min(above, 200)
+    
+    if start < 0 (
+        start = 0
+    )
+    
+    if end > messages.len (
+        end = messages.len
+    )
+    
+    for i end - start (
+        result.append(messages[start + i].toStr().JsonParse())
+    )
+
+    return {
+        messages: result,
+        start, end,
+        messageIdx: idx
+    }
 )
 
 def editChannelMessage(string channelId, string messageId, string newContent, string id) bool (
-    object ch = getChannel(channelId)
-    if ch == null (
+    array messages = getChannelMessages(channelId)
+    if messages.len == 0 or typeof(messages) != "array" (
         return false
     )
 
-    if typeof(ch.messages) != "array" (
-        return false
-    )
-
-    array messages = ch.messages.assert(array)
     for i messages.len (
         any msg = messages[i]
         if typeof(msg) == "object" (
@@ -321,8 +415,7 @@ def editChannelMessage(string channelId, string messageId, string newContent, st
                 message.edited = true
                 message.edited_at = timestamp / 1000
                 messages[i] = message
-                ch.messages = messages
-                saveChannel(channelId, ch)
+                saveChannelMessages(channelId, messages)
                 return true
             )
         )
@@ -331,47 +424,19 @@ def editChannelMessage(string channelId, string messageId, string newContent, st
 )
 
 def getMessageReplies(string channelId, string messageId) array (
-    object ch = getChannel(channelId)
-    if ch == null (
-        return []
-    )
-
-    if typeof(ch.messages) != "array" (
-        return []
-    )
-
-    array messages = ch.messages.assert(array)
-    array replies = []
-    for i messages.len (
-        any msg = messages[i]
-        if typeof(msg) == "object" (
-            object message = msg.assert(object)
-            if message.reply_to.toStr() == messageId (
-                replies.append(message)
-            )
-        )
-    )
-    // Return in reverse order (most recent first)
-    array reversed = []
-    int j = replies.len
-    while j >= 1 (
-        reversed.append(replies[j])
-        j = j - 1
-    )
-    return reversed
+    array messages = getChannelMessages(channelId)
+    
+    array replies = arrays.Filter(messages, v bool -> v.reply_to.toStr() == messageId)
+    
+    return arrays.Reverse(replies)
 )
 
 def deleteChannelMessage(string channelId, string messageId, string id) bool (
-    object ch = getChannel(channelId)
-    if ch == null (
+    array messages = getChannelMessages(channelId)
+    if messages.len == 0 or typeof(messages) != "array" (
         return false
     )
 
-    if typeof(ch.messages) != "array" (
-        return false
-    )
-
-    array messages = ch.messages.assert(array)
     array newMessages = []
     bool deleted = false
     for i messages.len (
@@ -391,31 +456,26 @@ def deleteChannelMessage(string channelId, string messageId, string id) bool (
         )
     )
     if deleted (
-        ch.messages = newMessages
-        saveChannel(channelId, ch)
+        saveChannelMessages(channelId, newMessages)
         return true
     )
     return false
 )
 
 def getMessage(string channelId, string messageId) object (
-    object ch = getChannel(channelId)
-    if ch == null (
+    array messages = getChannelMessages(channelId)
+    if messages.len == 0 or typeof(messages) != "array" (
         return null
     )
 
-    if typeof(ch.messages) != "array" (
-        return null
-    )
-
-    array messages = ch.messages.assert(array)
     for i messages.len (
         any msg = messages[i]
-        if typeof(msg) == "object" (
-            object message = msg.assert(object)
-            if message.id.toStr() == messageId (
-                return message
-            )
+        if typeof(msg) != "object" (
+            continue
+        )
+        object message = msg.assert(object)
+        if message.id.toStr() == messageId (
+            return message
         )
     )
     return null
@@ -452,50 +512,42 @@ def addReaction(string channelId, string messageId, string emoji, string userId)
         return false
     )
     
-    object ch = getChannel(channelId)
-    if ch == null (
-        return false
-    )
-    
-    if typeof(ch.messages) != "array" (
-        return false
-    )
-    
-    array messages = ch.messages.assert(array)
+    array messages = getChannelMessages(channelId)
     for i messages.len (
         any msg = messages[i]
-        if typeof(msg) == "object" (
-            object message = msg.assert(object)
-            if message.id.toStr() == messageId (
-                if typeof(message.reactions) != "array" (
-                    message.reactions = []
-                )
-                array reactions = message.reactions.assert(array)
-                
-                int index = findReactionIndex(reactions, emoji)
-                if index > 0 (
-                    object reaction = reactions[index].assert(object)
-                    array users = reaction.users.assert(array)
-                    if users.contains(userId) (
-                        return true
-                    )
-                    users.append(userId)
-                    reaction.users = users
-                    reactions[index] = reaction
-                ) else (
-                    reactions.append({
-                        emoji: emoji,
-                        users: [userId]
-                    })
-                )
-                
-                message.reactions = reactions
-                messages[i] = message
-                ch.messages = messages
-                saveChannel(channelId, ch)
+        if typeof(msg) != "object" (
+            continue
+        )
+        object message = msg.assert(object)
+        if message.id.toStr() != messageId (
+            continue
+        )
+        if typeof(message.reactions) != "array" (
+            message.reactions = []
+        )
+        array reactions = message.reactions.assert(array)
+        
+        int index = findReactionIndex(reactions, emoji)
+        if index > 0 (
+            object reaction = reactions[index].assert(object)
+            array users = reaction.users.assert(array)
+            if users.contains(userId) (
                 return true
             )
+            users.append(userId)
+            reaction.users = users
+            reactions[index] = reaction
+        ) else (
+            reactions.append({
+                emoji: emoji,
+                users: [userId]
+            })
         )
+        
+        message.reactions = reactions
+        messages[i] = message
+        saveChannelMessages(channelId, messages)
+        return true
     )
     return false
 )
@@ -517,118 +569,88 @@ def removeReaction(string channelId, string messageId, string emoji, string user
     array messages = ch.messages.assert(array)
     for i messages.len (
         any msg = messages[i]
-        if typeof(msg) == "object" (
-            object message = msg.assert(object)
-            if message.id.toStr() == messageId (
-                if typeof(message.reactions) != "array" (
-                    return false
-                )
-                array reactions = message.reactions.assert(array)
-                
-                int index = findReactionIndex(reactions, emoji)
-                if index <= 0 (
-                    return false
-                )
-                
-                object reaction = reactions[index].assert(object)
-                array users = reaction.users.assert(array)
-                
-                if !users.contains(userId) (
-                    return false
-                )
-                
-                array newUsers = []
-                for j users.len (
-                    string uid = users[j].toStr()
-                    if uid != userId (
-                        newUsers.append(uid)
-                    )
-                )
-                
-                if newUsers.len == 0 (
-                    array newReactions = []
-                    for j reactions.len (
-                        if j != index (
-                            newReactions.append(reactions[j])
-                        )
-                    )
-                    reactions = newReactions
-                ) else (
-                    reaction.users = newUsers
-                    reactions[index] = reaction
-                )
-                
-                if reactions.len == 0 (
-                    message.delete("reactions")
-                ) else (
-                    message.reactions = reactions
-                )
-                messages[i] = message
-                ch.messages = messages
-                saveChannel(channelId, ch)
-                return true
+        if typeof(msg) != "object" (
+            continue
+        )
+        object message = msg.assert(object)
+        if message.id.toStr() != messageId (
+            continue
+        )
+        if typeof(message.reactions) != "array" (
+            return false
+        )
+        array reactions = message.reactions.assert(array)
+        
+        int index = findReactionIndex(reactions, emoji)
+        if index <= 0 (
+            return false
+        )
+        
+        object reaction = reactions[index].assert(object)
+        array users = reaction.users.assert(array)
+        
+        if !users.contains(userId) (
+            return false
+        )
+        
+        array newUsers = []
+        for j users.len (
+            string uid = users[j].toStr()
+            if uid != userId (
+                newUsers.append(uid)
             )
         )
+        
+        if newUsers.len == 0 (
+            array newReactions = []
+            for j reactions.len (
+                if j != index (
+                    newReactions.append(reactions[j])
+                )
+            )
+            reactions = newReactions
+        ) else (
+            reaction.users = newUsers
+            reactions[index] = reaction
+        )
+        
+        if reactions.len == 0 (
+            message.delete("reactions")
+        ) else (
+            message.reactions = reactions
+        )
+        messages[i] = message
+        saveChannelMessages(channelId, messages)
+        return true
     )
     return false
 )
 
 def pinChannelMessage(string channelId, string messageId, bool pinned) bool (
-    object ch = getChannel(channelId)
-    if ch == null (
-        return false
-    )
-
-    if typeof(ch.messages) != "array" (
-        return false
-    )
-
-    array messages = ch.messages.assert(array)
+    array messages = getChannelMessages(channelId)
     for i messages.len (
         any msg = messages[i]
-        if typeof(msg) == "object" (
-            object message = msg.assert(object)
-            if message.id.toStr() == messageId (
-                message.pinned = pinned
-                messages[i] = message
-                ch.messages = messages
-                saveChannel(channelId, ch)
-                return true
-            )
+        if typeof(msg) != "object" (
+            continue
         )
+        object message = msg.assert(object)
+        if message.id.toStr() != messageId (
+            continue
+        )
+        message.pinned = pinned
+        messages[i] = message
+        saveChannelMessages(channelId, messages)
+        return true
     )
     return false
 )
 
 def getPinnedMessages(string channelId) array (
-    object ch = getChannel(channelId)
-    if ch == null (
-        return []
-    )
+    array messages = getChannelMessages(channelId)
 
-    if typeof(ch.messages) != "array" (
-        return []
-    )
-
-    array messages = ch.messages.assert(array)
-    array pinned = []
-    for i messages.len (
-        any msg = messages[i]
-        if typeof(msg) == "object" (
-            object message = msg.assert(object)
-            if message.pinned.toBool() == true (
-                pinned.append(message)
-            )
-        )
-    )
+    array pinned = arrays.Filter(messages, v bool -> v.pinned == true)
     // Return in reverse order (most recent first)
-    array reversed = []
-    int j = pinned.len
-    while j >= 1 (
-        reversed.append(pinned[j])
-        j = j - 1
-    )
-    return reversed
+    return arrays.Reverse(pinned)
 )
 
 def formatReactionsForAPI(object message) object (
@@ -639,22 +661,23 @@ def formatReactionsForAPI(object message) object (
     array reactions = message.reactions.assert(array)
     for i reactions.len (
         any r = reactions[i]
-        if typeof(r) == "object" (
-            object reaction = r.assert(object)
-            string emoji = reaction.emoji.toStr()
-            array userIds = reaction.users.assert(array)
-            array usernames = []
-            for j userIds.len (
-                string userId = userIds[j].toStr()
-                string username = getUsernameById(userId)
-                if username != "" (
-                    usernames.append(username)
-                ) else (
-                    usernames.append(userId)
-                )
-            )
-            result[emoji] = usernames
+        if typeof(r) != "object" (
+            continue
         )
+        object reaction = r.assert(object)
+        string emoji = reaction.emoji.toStr()
+        array userIds = reaction.users.assert(array)
+        array usernames = []
+        for j userIds.len (
+            string userId = userIds[j].toStr()
+            string username = getUsernameById(userId)
+            if username != "" (
+                usernames.append(username)
+            ) else (
+                usernames.append(userId)
+            )
+        )
+        result[emoji] = usernames
     )
     return result
 )
