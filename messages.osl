@@ -117,12 +117,9 @@ def getLastMessageTimestamp(object channel) number (
         return 0
     )
 
-    if typeof(channel.messages) != "array" (
-        return 0
-    )
+    array messages = getChannelMessages(channel.name.toStr())
 
-    array messages = channel.messages.assert(array)
-    if messages.len == 0 (
+    if typeof(messages) != "array" (
         return 0
     )
 
